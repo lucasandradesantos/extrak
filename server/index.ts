@@ -255,6 +255,12 @@ app.post("/api/prd", async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-});
+// Na Vercel o app roda como serverless function (sem servidor persistente).
+// Localmente, sobe o servidor HTTP normalmente.
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
+}
+
+export default app;

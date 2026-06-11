@@ -113,3 +113,14 @@ Retorna `{ prd }` em markdown. Responde `409` se houver gaps de severidade alta 
 npm run build
 npm start
 ```
+
+## Deploy na Vercel
+
+O projeto está pronto para a Vercel: o frontend (`client/`) é publicado como site estático e o backend Express roda como **serverless function** (pasta `api/`).
+
+1. Importe o repositório na Vercel.
+2. Em **Settings → Environment Variables**, defina:
+   - `FIGMA_TOKEN`
+   - `ANTHROPIC_API_KEY`
+   - `ANTHROPIC_MODEL` (opcional)
+3. As configurações de install/build/output e o roteamento de `/api/*` já estão no `vercel.json` — não é preciso ajustar nada no painel.
