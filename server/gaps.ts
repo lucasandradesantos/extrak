@@ -1,0 +1,124 @@
+import { createHash } from "node:crypto";
+import {
+  Gap,
+  GapCategoria,
+  GapDiff,
+  GapSeveridade,
+  GapStatus,
+} from "./types";
+
+const CATEGORIAS: GapCategoria[] = [
+  "cobertura",
+  "metrica_sem_meta",
+  "persona_faltante",
+  "inconsistencia",
+  "criterio_nao_testavel",
+  "pergunta_cliente",
+];
+
+const SEVERIDADES: GapSeveridade[] = ["alta", "media", "baixa"];
+
+/**
+ * ID estável baseado em hash da chave (localizacao | categoria | titulo),
+ * nunca em ordem de aparição. Garante que o mesmo gap mantenha o mesmo ID
+ * entre reprocessamentos, permitindo o diff honesto.
+ */
+export function computeGapId(chave: string): string {
+  return createHash("sha1")
+    .update(chave.trim().toLowerCase())
+    .digest("hex")
+    .slice(0, 12);
+}
+
+function normalizeChave(gap: Partial<Gap>): string {
+  if (gap.chave && gap.chave.trim()) {
+    return gap.chave.trim();
+  }
+  return [gap.localizacao, gap.categoria, gap.titulo]
+    .filter(Boolean)
+    .join(" | ");
+}
+
+function coerceCategoria(value: unknown): GapCategoria {
+  return CATEGORIAS.includes(value as GapCategoria)
+    ? (value as GapCategoria)
+    : "cobertura";
+}
+
+function coerceSeveridade(value: unknown): GapSeveridade {
+  return SEVERIDADES.includes(value as GapSeveridade)
+    ? (value as GapSeveridade)
+    : "media";
+}
+
+function coerceStatus(value: unknown): GapStatus {
+  return value === "resolvido" ? "resolvido" : "aberto";
+}
+
+/**
+ * Normaliza os gaps crus vindos da IA: garante chave/ID estável, valores de
+ * enum válidos e campos obrigatórios. Deduplica por ID.
+ */
+export function normalizeGaps(rawGaps: unknown): Gap[] {
+  if (!Array.isArray(rawGaps)) return [];
+
+  const byId = new Map<string, Gap>();
+
+  for (const raw of rawGaps) {
+    if (!raw || typeof raw !== "object") continue;
+    const r = raw as Record<string, unknown>;
+
+    const chave = normalizeChave({
+      chave: typeof r.chave === "string" ? r.chave : undefined,
+      localizacao: typeof r.localizacao === "string" ? r.localizacao : undefined,
+      categoria: r.categoria as GapCategoria | undefined,
+      titulo: typeof r.titulo === "string" ? r.titulo : undefined,
+    });
+
+    if (!chave) continue;
+
+    const id = computeGapId(chave);
+
+    const gap: Gap = {
+      id,
+      chave,
+      categoria: coerceCategoria(r.categoria),
+      severidade: coerceSeveridade(r.severidade),
+      localizacao: typeof r.localizacao === "string" ? r.localizacao : "—",
+      titulo: typeof r.titulo === "string" ? r.titulo : chave,
+      descricao: typeof r.descricao === "string" ? r.descricao : "",
+      sugestao: typeof r.sugestao === "string" ? r.sugestao : "",
+      status: coerceStatus(r.status),
+    };
+
+    byId.set(id, gap);
+  }
+
+  return [...byId.values()];
+}
+
+/**
+ * Compara o conjunto anterior com o novo por ID estável:
+ * - resolvidos: existiam antes e sumiram agora (ou vieram marcados resolvido)
+ * - novos: aparecem só agora
+ * - abertos: continuam presentes em ambos
+ */
+export function diffGaps(previous: Gap[], next: Gap[]): GapDiff {
+  const prevIds = new Set(previous.map((g) => g.id));
+  const nextOpen = next.filter((g) => g.status !== "resolvido");
+  const nextOpenIds = new Set(nextOpen.map((g) => g.id));
+
+  const resolvidos = previous
+    .filter((g) => !nextOpenIds.has(g.id))
+    .map((g) => g.id);
+
+  const novos = nextOpen
+    .filter((g) => !prevIds.has(g.id))
+    .map((g) => g.id);
+
+  const abertos = nextOpen
+    .filter((g) => prevIds.has(g.id))
+    .map((g) => g.id);
+
+  return { resolvidos, novos, abertos };
+}
