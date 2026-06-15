@@ -39,6 +39,46 @@ const SEVERIDADE_LABELS: Record<GapSeveridade, string> = {
   baixa: "Baixa",
 };
 
+/**
+ * Lê a resposta da API tolerando corpos não-JSON (ex.: páginas de erro 5xx da
+ * Vercel) e mensagens de timeout, evitando o confuso "Unexpected token".
+ */
+async function readApiJson<T>(response: Response, fallbackMessage: string): Promise<T> {
+  const text = await response.text();
+
+  let data: unknown = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = null;
+    }
+  }
+
+  if (!response.ok) {
+    const apiError =
+      data && typeof data === "object" && "error" in data
+        ? String((data as { error: unknown }).error)
+        : null;
+
+    if (response.status === 504 || /FUNCTION_INVOCATION_TIMEOUT/i.test(text)) {
+      throw new Error(
+        "A análise demorou demais e excedeu o limite de tempo do servidor (timeout). " +
+          "Boards muito grandes podem ultrapassar o limite da função serverless. Tente novamente " +
+          "ou reduza o tamanho do board."
+      );
+    }
+
+    throw new Error(apiError ?? fallbackMessage);
+  }
+
+  if (data === null) {
+    throw new Error(fallbackMessage);
+  }
+
+  return data as T;
+}
+
 function groupItemsByType(items: ParsedItem[]): Map<string, ParsedItem[]> {
   const grouped = new Map<string, ParsedItem[]>();
 
@@ -235,13 +275,12 @@ export default function App() {
         body: JSON.stringify({ url }),
       });
 
-      const data = await response.json();
+      const data = await readApiJson<ExportResponse>(
+        response,
+        "Erro ao exportar o board."
+      );
 
-      if (!response.ok) {
-        throw new Error(data.error ?? "Erro ao exportar o board.");
-      }
-
-      setResult(data as ExportResponse);
+      setResult(data);
       setActiveTab("parsed");
     } catch (err) {
       setResult(null);
@@ -267,13 +306,10 @@ export default function App() {
         body: JSON.stringify(body),
       });
 
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error ?? "Erro ao analisar o Discovery.");
-      }
-
-      const analysis = data as AnalyzeResponse;
+      const analysis = await readApiJson<AnalyzeResponse>(
+        response,
+        "Erro ao analisar o Discovery."
+      );
       setGaps(analysis.gaps);
       setDiff(analysis.diff ?? null);
       setHasAnalyzed(true);
@@ -312,13 +348,12 @@ export default function App() {
         }),
       });
 
-      const data = await response.json();
+      const data = await readApiJson<PrdResponse>(
+        response,
+        "Erro ao gerar o PRD."
+      );
 
-      if (!response.ok) {
-        throw new Error(data.error ?? "Erro ao gerar o PRD.");
-      }
-
-      setPrd((data as PrdResponse).prd);
+      setPrd(data.prd);
     } catch (err) {
       setPrdError(err instanceof Error ? err.message : "Erro desconhecido.");
     } finally {
