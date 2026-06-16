@@ -9,6 +9,9 @@ export default defineConfig({
       "/api": {
         target: "http://localhost:3001",
         changeOrigin: true,
+        // Análise IA pode levar 1–3 min por bloco; evita "socket hang up" no proxy.
+        timeout: 300_000,
+        proxyTimeout: 300_000,
       },
     },
   },

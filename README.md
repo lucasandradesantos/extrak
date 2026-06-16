@@ -1,42 +1,50 @@
-# FigJam → PRD
+# FigJam → PRD (SaaS)
 
-Web app local que transforma um board FigJam em um PRD confiável, passando por um pipeline com loop de reprocessamento:
+Plataforma SaaS multi-time que transforma um board FigJam (Discovery) — opcionalmente combinado com um protótipo Figma — em um PRD confiável. A IA critica o material, encontra gaps (inclusive comparando Discovery × Protótipo) e gera um PRD que admite honestamente o que ainda não foi definido.
 
-1. **URL → JSON**: extrai a `fileKey` da URL e chama a REST API do Figma.
-2. **JSON → Discovery (parser determinístico)**: um parser em código puro (sem IA) percorre a árvore de SECTIONs e extrai apenas `{hierarquia + texto}`. Isso reduz custo e elimina alucinação sobre layout.
-3. **Crítica (IA)**: o Claude analisa o Discovery e devolve os _gaps_ em **JSON estruturado** (com IDs estáveis), agrupados por severidade.
-4. **Devolutiva + reprocessar (Modelo B)**: cada gap tem um campo de resposta na própria tela. Ao reprocessar, só os gaps respondidos entram no contexto e o app mostra honestamente "X resolvidos, Y novos, Z abertos" comparando IDs estáveis.
-5. **PRD final**: habilitado apenas quando não há gaps de severidade alta em aberto. Onde a informação ainda não existe, o PRD escreve `[A DEFINIR — depende de X]` em vez de inventar.
+## Principais características
+
+- Autenticação por email/senha com **Supabase Auth**. Não há cadastro público: contas são criadas por administradores.
+- **Multi-time**: cada usuário pertence a um time e vê apenas os projetos do seu time. Papéis: `super_admin`, `team_admin`, `member`.
+- **Painel de admin** no app para criar times e usuários.
+- Extração de **Discovery (FigJam)** e **Protótipo (Figma Design)** usando uma **única chave da API Figma** no servidor — nenhum usuário informa credenciais.
+- Análise da IA (Claude) com **chave única no servidor**, comparando Discovery e Protótipo.
+- Persistência completa no **Supabase** (projetos, fontes extraídas, análises, gaps, PRDs).
+- Análise pesada processada **em passos** (chunks), robusta ao limite de 60s da Vercel Hobby.
 
 ## Pré-requisitos
 
 - Node.js 18+
+- Projeto Supabase (já provisionado: `Extrak`)
 - Personal Access Token do Figma com escopo `file_content:read`
 - Chave da API Anthropic (Claude)
 
 ## Configuração
 
-1. Copie o arquivo de ambiente:
-
-```bash
-cp .env.example .env
-```
-
-2. Edite `.env` e defina suas chaves:
+### 1. Variáveis de ambiente do servidor (`.env`)
 
 ```env
-FIGMA_TOKEN=seu_token_figma_aqui
-ANTHROPIC_API_KEY=sua_chave_anthropic_aqui
-# Opcional (padrão: claude-sonnet-4-20250514)
-ANTHROPIC_MODEL=claude-sonnet-4-20250514
+FIGMA_TOKEN=seu_token_figma
+ANTHROPIC_API_KEY=sua_chave_anthropic
+ANTHROPIC_MODEL=claude-sonnet-4-5-20250929
+
+SUPABASE_URL=https://SEU_PROJETO.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=sua_service_role_key   # SECRETA (Supabase Dashboard > Project Settings > API)
+ADMIN_BOOTSTRAP_SECRET=um_segredo_forte          # usado uma única vez para criar o 1º super-admin
 ```
 
-- Token do Figma: [Figma → Settings → Personal access tokens](https://www.figma.com/settings).
-- Chave Anthropic: [console.anthropic.com](https://console.anthropic.com/settings/keys).
+### 2. Variáveis de ambiente do frontend (`client/.env`)
 
-> **Segurança:** nunca commite o arquivo `.env`. Se uma chave foi exposta publicamente, revogue-a imediatamente e gere uma nova.
+```env
+VITE_SUPABASE_URL=https://SEU_PROJETO.supabase.co
+VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_xxx   # chave publishable (pública)
+```
 
-## Executar
+### 3. Desabilitar o cadastro público no Supabase
+
+No Supabase Dashboard → Authentication → Providers/Settings, **desative o signup público** (os usuários são criados apenas pelo admin).
+
+## Executar (local)
 
 ```bash
 npm install
@@ -47,80 +55,49 @@ npm run dev
 - Frontend: http://localhost:5173
 - Backend: http://localhost:3001
 
-## Uso
+## Primeiro acesso (bootstrap do super-admin)
 
-1. Abra http://localhost:5173
-2. Cole a URL do board FigJam (ex: `https://www.figma.com/board/abc123/Nome-do-Board`) ou a file key.
-3. Clique em **Extrair** e navegue pelas abas:
-   - **Conteúdo extraído** — Discovery em texto, com "Copiar tudo".
-   - **JSON bruto** — JSON completo da API Figma.
-   - **Análise (IA)** — clique em **Analisar com IA**; revise os gaps por severidade; responda os que puder e clique em **Reprocessar** para ver o diff.
-   - **PRD** — clique em **Gerar PRD** (liberado quando não há gaps de severidade alta em aberto); copie ou baixe o `.md`.
-
-## API
-
-### `POST /api/export`
-
-```json
-{ "url": "https://www.figma.com/board/.../..." }
-```
-
-Retorna `metadata`, `parsed` (Discovery) e `raw` (JSON Figma).
-
-### `POST /api/analyze`
-
-Primeira análise:
-
-```json
-{ "discovery": "texto estruturado do Discovery" }
-```
-
-Reprocessamento (anexa respostas e devolve o diff por IDs estáveis):
-
-```json
-{
-  "discovery": "...",
-  "gaps": [ /* gaps anteriores */ ],
-  "respostas": { "<gapId>": "resposta do usuário" }
-}
-```
-
-Retorna `{ gaps, diff? }`, onde cada gap tem `id`, `chave`, `categoria`, `severidade`, `localizacao`, `titulo`, `descricao`, `sugestao` e `status`.
-
-### `POST /api/prd`
-
-```json
-{
-  "discovery": "...",
-  "gaps": [ /* gaps atuais */ ],
-  "respostas": { "<gapId>": "..." },
-  "boardName": "Nome do board"
-}
-```
-
-Retorna `{ prd }` em markdown. Responde `409` se houver gaps de severidade alta em aberto.
-
-## Arquitetura
-
-- **Etapa 2.5 (parser determinístico):** `server/parse-figjam.ts` — nunca passamos o JSON cru para a IA.
-- **IDs estáveis:** `server/gaps.ts` calcula `id = sha1(chave)` (`localizacao | categoria | titulo`), nunca por ordem de aparição, para que o reprocessar não embaralhe os gaps.
-- **Prompts:** `server/prompts.ts` concentra os prompts das etapas 3 e 5 (substitua pelos seus prompts definitivos aqui).
-- **Estado:** o loop de gaps vive em memória no navegador (sem banco). Recarregar a página zera a análise.
-
-## Build para produção
+Com o servidor rodando e nenhum super-admin existente, crie o primeiro administrador (uma única vez):
 
 ```bash
-npm run build
-npm start
+curl -X POST http://localhost:3001/api/admin/bootstrap \
+  -H "Content-Type: application/json" \
+  -d '{"secret":"SEU_ADMIN_BOOTSTRAP_SECRET","email":"voce@empresa.com","password":"senhaForte123","full_name":"Seu Nome"}'
 ```
+
+Depois faça login no app e use o painel **Admin** para criar times e demais usuários.
+
+## Fluxo de uso
+
+1. Login com email/senha.
+2. **Admin** cria times e usuários (cada usuário associado a um time).
+3. Em **Projetos**, crie um projeto informando a URL do Discovery (FigJam) e, opcionalmente, a do Protótipo (Figma).
+4. Na página do projeto:
+   - **Discovery / Protótipo**: conteúdo estruturado extraído.
+   - **Análise (IA)**: roda a crítica em passos (barra de progresso), lista os gaps por severidade; responda os gaps e clique em **Reprocessar**.
+   - **PRD**: liberado quando não há gaps de severidade alta em aberto; copie ou baixe o `.md`.
 
 ## Deploy na Vercel
 
-O projeto está pronto para a Vercel: o frontend (`client/`) é publicado como site estático e o backend Express roda como **serverless function** (pasta `api/`).
+O frontend (`client/`) é publicado como site estático e o backend Express roda como serverless function (`api/`). O `vercel.json` já cuida do install, build, roteamento de `/api/*` e fallback de SPA.
 
-1. Importe o repositório na Vercel.
-2. Em **Settings → Environment Variables**, defina:
-   - `FIGMA_TOKEN`
-   - `ANTHROPIC_API_KEY`
-   - `ANTHROPIC_MODEL` (opcional)
-3. As configurações de install/build/output e o roteamento de `/api/*` já estão no `vercel.json` — não é preciso ajustar nada no painel.
+Configure no painel da Vercel (Settings → Environment Variables) **todas** as variáveis do servidor e do frontend listadas acima:
+
+- `FIGMA_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`
+- `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `ADMIN_BOOTSTRAP_SECRET`
+- `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY`
+
+> Limite de tempo: no plano Hobby cada função serverless tem teto de 60s. A análise roda em passos para caber nesse limite; boards muito grandes podem exigir o plano Pro (até 300s).
+
+## Arquitetura
+
+- **Banco/Auth:** Supabase. Tabelas em `public` (`teams`, `profiles`, `projects`, `project_sources`, `analyses`, `gaps`, `prds`, `analysis_jobs`) com RLS por time e helpers `SECURITY DEFINER` em schema privado.
+- **Servidor (`server/`):** Express. Middleware valida o JWT do Supabase e carrega o perfil. Rotas:
+  - `/api/admin/*` — bootstrap, times e usuários (Admin API + service_role).
+  - `/api/projects` — CRUD de projetos por time, com extração do Figma.
+  - `/api/projects/:id/analyze` + `/analyze/step` — análise em passos.
+  - `/api/projects/:id/gaps` (PATCH) e `/api/projects/:id/prd` (POST).
+- **Extração:** `server/parse-figjam.ts` (Discovery) e `server/parse-figma-design.ts` (telas/textos/fluxos do protótipo).
+- **IDs estáveis:** `server/gaps.ts` calcula `gap_hash = sha1(chave)`, mantendo o gap entre reprocessamentos.
+- **Prompts:** `server/prompts.ts` concentra as etapas de crítica (com comparação Discovery × Protótipo) e de PRD.
+- **Frontend (`client/`):** React + react-router; páginas de login, dashboard, projeto e admin; sessão via `@supabase/supabase-js`.

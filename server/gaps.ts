@@ -4,6 +4,7 @@ import {
   GapCategoria,
   GapDiff,
   GapSeveridade,
+  GapSource,
   GapStatus,
 } from "./types";
 
@@ -14,9 +15,27 @@ const CATEGORIAS: GapCategoria[] = [
   "inconsistencia",
   "criterio_nao_testavel",
   "pergunta_cliente",
+  "tela_sem_discovery",
+  "discovery_sem_tela",
+  "inconsistencia_proto_discovery",
 ];
 
 const SEVERIDADES: GapSeveridade[] = ["alta", "media", "baixa"];
+
+const SOURCES: GapSource[] = ["discovery", "prototype", "comparacao"];
+
+/**
+ * Origem do gap derivada da categoria — deixa explícito para o time de design
+ * de onde o gap nasce:
+ * - tela_sem_discovery → existe no Protótipo, falta no Discovery → "prototype"
+ * - discovery_sem_tela → existe no Discovery, falta tela → "discovery"
+ * - inconsistencia_proto_discovery → conflito entre os dois → "comparacao"
+ */
+const CATEGORIA_SOURCE: Partial<Record<GapCategoria, GapSource>> = {
+  tela_sem_discovery: "prototype",
+  discovery_sem_tela: "discovery",
+  inconsistencia_proto_discovery: "comparacao",
+};
 
 /**
  * ID estável baseado em hash da chave (localizacao | categoria | titulo),
@@ -55,6 +74,17 @@ function coerceStatus(value: unknown): GapStatus {
   return value === "resolvido" ? "resolvido" : "aberto";
 }
 
+function coerceSource(value: unknown, categoria: GapCategoria): GapSource {
+  // Para categorias de comparação a origem é determinística pela categoria
+  // (ignora o "comparacao" genérico que a IA manda, para distinguir a fonte).
+  const derived = CATEGORIA_SOURCE[categoria];
+  if (derived) return derived;
+  if (SOURCES.includes(value as GapSource)) {
+    return value as GapSource;
+  }
+  return "discovery";
+}
+
 /**
  * Normaliza os gaps crus vindos da IA: garante chave/ID estável, valores de
  * enum válidos e campos obrigatórios. Deduplica por ID.
@@ -78,17 +108,19 @@ export function normalizeGaps(rawGaps: unknown): Gap[] {
     if (!chave) continue;
 
     const id = computeGapId(chave);
+    const categoria = coerceCategoria(r.categoria);
 
     const gap: Gap = {
       id,
       chave,
-      categoria: coerceCategoria(r.categoria),
+      categoria,
       severidade: coerceSeveridade(r.severidade),
       localizacao: typeof r.localizacao === "string" ? r.localizacao : "—",
       titulo: typeof r.titulo === "string" ? r.titulo : chave,
       descricao: typeof r.descricao === "string" ? r.descricao : "",
       sugestao: typeof r.sugestao === "string" ? r.sugestao : "",
       status: coerceStatus(r.status),
+      source: coerceSource(r.source, categoria),
     };
 
     byId.set(id, gap);

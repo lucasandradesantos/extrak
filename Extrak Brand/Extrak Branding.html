@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Extrak — Manual de Marca</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<style>
+  *{box-sizing:border-box;margin:0;padding:0;}
+  :root{--ink:#000;--paper:#fff;--mut:rgba(0,0,0,.55);}
+  html{background:#d8d8da;}
+  body{font-family:'JetBrains Mono',monospace;color:var(--ink);-webkit-font-smoothing:antialiased;}
+
+  .page{width:1000px;margin:0 auto;background:var(--paper);}
+  section{padding:84px 96px;border-bottom:1px solid #e6e6e8;}
+  section.black{background:#000;color:#fff;border-bottom-color:#1c1c1c;}
+
+  .ub{font-family:'Unbounded',sans-serif;font-weight:700;letter-spacing:-0.02em;line-height:1;}
+  .tag{font-family:'JetBrains Mono',monospace;font-weight:500;text-transform:uppercase;}
+
+  .kicker{font-size:12px;letter-spacing:.32em;text-transform:uppercase;color:var(--mut);display:flex;align-items:center;gap:14px;margin-bottom:40px;}
+  .kicker::before{content:"";width:34px;height:1px;background:currentColor;opacity:.5;}
+  .black .kicker{color:rgba(255,255,255,.6);}
+  h2{font-family:'Unbounded',sans-serif;font-weight:500;font-size:26px;letter-spacing:-0.01em;margin-bottom:8px;}
+  .lede{font-size:13.5px;line-height:1.7;color:var(--mut);max-width:560px;}
+  .black .lede{color:rgba(255,255,255,.6);}
+
+  /* lockups */
+  .lk-col{display:flex;flex-direction:column;align-items:flex-start;}
+  .lk-row{display:flex;align-items:flex-end;}
+
+  /* cover */
+  .cover{padding:120px 96px 110px;}
+  .cover .big{font-size:150px;}
+  .cover .big-tag{font-size:22px;letter-spacing:.5em;color:var(--mut);margin-top:30px;}
+  .cover .meta{margin-top:80px;display:flex;justify-content:space-between;font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--mut);border-top:1px solid #e6e6e8;padding-top:22px;}
+
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:0;margin-top:54px;border:1px solid #e6e6e8;}
+  .cell{padding:64px 56px;display:flex;align-items:center;justify-content:center;min-height:230px;}
+  .cell + .cell{border-left:1px solid #e6e6e8;}
+  .cell.dark{background:#000;}
+  .cap{font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:var(--mut);padding:14px 56px;border-top:1px solid #e6e6e8;}
+  .capwrap{display:grid;grid-template-columns:1fr 1fr;}
+  .capwrap .cap + .cap{border-left:1px solid #e6e6e8;}
+
+  /* color */
+  .swatches{display:flex;gap:24px;margin-top:50px;}
+  .sw{flex:1;}
+  .sw .chip{height:150px;border-radius:10px;border:1px solid #e6e6e8;}
+  .sw .info{display:flex;justify-content:space-between;margin-top:14px;font-size:12px;letter-spacing:.06em;}
+  .sw .info b{font-weight:700;}
+  .sw .info span{color:var(--mut);}
+
+  /* type */
+  .typerow{display:flex;align-items:baseline;gap:30px;padding:26px 0;border-top:1px solid #e6e6e8;}
+  .typerow:first-of-type{margin-top:46px;}
+  .typerow .lab{width:150px;flex:none;font-size:11px;letter-spacing:.2em;text-transform:uppercase;color:var(--mut);}
+  .typerow .spec{margin-left:auto;font-size:11px;color:var(--mut);text-align:right;line-height:1.6;flex:none;}
+
+  /* clearspace */
+  .cs{margin-top:50px;display:flex;gap:60px;align-items:center;flex-wrap:wrap;}
+  .csbox{position:relative;padding:60px;border:1px dashed #c7c7cc;}
+  .csbox .inner{position:relative;outline:1px solid #ededf0;}
+
+  /* dont */
+  .dos{display:grid;grid-template-columns:repeat(3,1fr);gap:22px;margin-top:50px;}
+  .dont{border:1px solid #e6e6e8;border-radius:10px;overflow:hidden;}
+  .dont .vis{height:130px;display:flex;align-items:center;justify-content:center;background:#fafafa;}
+  .dont .txt{padding:13px 16px;font-size:11.5px;line-height:1.5;border-top:1px solid #e6e6e8;color:var(--mut);}
+  .dont .x{color:#000;font-weight:700;}
+
+  /* files */
+  .files{margin-top:46px;display:grid;grid-template-columns:1fr 1fr;gap:0 56px;}
+  .frow{display:flex;justify-content:space-between;padding:15px 0;border-top:1px solid #e6e6e8;font-size:12.5px;}
+  .frow span{color:var(--mut);}
+
+  @media print{
+    html{background:#fff;}
+    .page{width:auto;}
+    section{break-inside:avoid;}
+    *{ -webkit-print-color-adjust:exact;print-color-adjust:exact;}
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- COVER -->
+  <section class="cover">
+    <div class="ub big">extrak</div>
+    <div class="tag big-tag">from figma</div>
+    <div class="meta">
+      <span>Manual de Marca</span>
+      <span>v1.0 · 2026</span>
+      <span>Discovery & QA com IA</span>
+    </div>
+  </section>
+
+  <!-- 01 LOGOTIPO -->
+  <section>
+    <div class="kicker">01 — Logotipo</div>
+    <h2>Dois lockups oficiais</h2>
+    <p class="lede">A marca é puramente tipográfica. <b>Ao lado</b> para barras, cabeçalhos e assinaturas horizontais; <b>abaixo</b> para espaços compactos, selos e usos centrados.</p>
+
+    <div class="grid2">
+      <div class="cell">
+        <div class="lk-row" style="gap:18px;">
+          <span class="ub" style="font-size:46px;">extrak</span>
+          <span class="tag" style="font-size:12px;letter-spacing:.3em;color:var(--mut);padding-bottom:7px;">from figma</span>
+        </div>
+      </div>
+      <div class="cell">
+        <div class="lk-col">
+          <span class="ub" style="font-size:46px;">extrak</span>
+          <span class="tag" style="font-size:11px;letter-spacing:.42em;color:var(--mut);margin-top:13px;">from figma</span>
+        </div>
+      </div>
+    </div>
+    <div class="capwrap">
+      <div class="cap">A · Ao lado</div>
+      <div class="cap">B · Abaixo</div>
+    </div>
+
+    <div class="grid2" style="margin-top:28px;">
+      <div class="cell dark">
+        <div class="lk-row" style="gap:18px;">
+          <span class="ub" style="font-size:46px;color:#fff;">extrak</span>
+          <span class="tag" style="font-size:12px;letter-spacing:.3em;color:rgba(255,255,255,.55);padding-bottom:7px;">from figma</span>
+        </div>
+      </div>
+      <div class="cell dark">
+        <div class="lk-col">
+          <span class="ub" style="font-size:46px;color:#fff;">extrak</span>
+          <span class="tag" style="font-size:11px;letter-spacing:.42em;color:rgba(255,255,255,.55);margin-top:13px;">from figma</span>
+        </div>
+      </div>
+    </div>
+    <div class="capwrap">
+      <div class="cap">Negativo · ao lado</div>
+      <div class="cap">Negativo · abaixo</div>
+    </div>
+  </section>
+
+  <!-- 02 SÍMBOLO -->
+  <section>
+    <div class="kicker">02 — Símbolo / Avatar</div>
+    <h2>O “e” como marca compacta</h2>
+    <p class="lede">Para avatar, favicon e ícone de app, isolamos o “e” do Unbounded num quadrado de cantos arredondados. Sem ícone desenhado — só a tipografia da marca.</p>
+    <div style="display:flex;gap:34px;margin-top:50px;align-items:center;">
+      <img src="assets/png/extrak-avatar-dark.png" width="150" height="150" alt="avatar escuro" style="border-radius:0;" />
+      <img src="assets/png/extrak-avatar-light.png" width="150" height="150" alt="avatar claro" style="border:1px solid #e6e6e8;" />
+      <img src="assets/png/extrak-avatar-dark.png" width="84" height="84" alt="" />
+      <img src="assets/png/extrak-avatar-dark.png" width="48" height="48" alt="" />
+      <img src="assets/png/extrak-avatar-dark.png" width="30" height="30" alt="" />
+    </div>
+  </section>
+
+  <!-- 03 COR -->
+  <section>
+    <div class="kicker">03 — Cor</div>
+    <h2>Preto &amp; branco, sem concessões</h2>
+    <p class="lede">A identidade é monocromática. Contraste total, zero distração — o foco é a precisão. A tagline pode aparecer em 55% para hierarquia.</p>
+    <div class="swatches">
+      <div class="sw"><div class="chip" style="background:#000;"></div><div class="info"><b>Ink</b><span>#000000</span></div></div>
+      <div class="sw"><div class="chip" style="background:#fff;"></div><div class="info"><b>Paper</b><span>#FFFFFF</span></div></div>
+      <div class="sw"><div class="chip" style="background:#737373;"></div><div class="info"><b>Tagline</b><span>Ink 55%</span></div></div>
+    </div>
+  </section>
+
+  <!-- 04 TIPOGRAFIA -->
+  <section>
+    <div class="kicker">04 — Tipografia</div>
+    <h2>Display redonda + mono técnica</h2>
+    <p class="lede">O contraste conceitual da marca: o lado criativo (Unbounded) encontra o lado técnico/QA (JetBrains Mono).</p>
+    <div class="typerow">
+      <div class="lab">Logotipo</div>
+      <div class="ub" style="font-size:40px;">extrak</div>
+      <div class="spec">Unbounded<br/>Bold · 700 · -2% tracking</div>
+    </div>
+    <div class="typerow">
+      <div class="lab">Tagline / UI</div>
+      <div class="tag" style="font-size:22px;letter-spacing:.18em;">FROM FIGMA</div>
+      <div class="spec">JetBrains Mono<br/>Medium · 500 · caixa-alta</div>
+    </div>
+  </section>
+
+  <!-- 05 ÁREA DE PROTEÇÃO -->
+  <section>
+    <div class="kicker">05 — Área de proteção &amp; tamanho</div>
+    <h2>Respiro mínimo = altura do “e”</h2>
+    <p class="lede">Mantenha ao redor da marca um espaço livre igual à altura-x do “e”. Não use o logotipo abaixo de 90px de largura (digital) — abaixo disso, use só o avatar.</p>
+    <div class="cs">
+      <div class="csbox">
+        <div class="inner" style="padding:34px;">
+          <span class="ub" style="font-size:38px;">extrak</span>
+        </div>
+      </div>
+      <div style="font-size:12px;letter-spacing:.04em;line-height:1.9;color:var(--mut);">
+        <div>MÍN. LOGOTIPO &nbsp;—&nbsp; 90px / 24mm</div>
+        <div>MÍN. AVATAR &nbsp;&nbsp;&nbsp;&nbsp;—&nbsp; 24px / 8mm</div>
+        <div>CLEAR SPACE &nbsp;&nbsp;&nbsp;—&nbsp; = altura do “e”</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 06 USOS INCORRETOS -->
+  <section>
+    <div class="kicker">06 — Usos incorretos</div>
+    <h2>O que nunca fazer</h2>
+    <div class="dos">
+      <div class="dont">
+        <div class="vis"><span class="ub" style="font-size:30px;color:#c0392b;">extrak</span></div>
+        <div class="txt"><span class="x">✕</span> Não aplicar cor ao logotipo.</div>
+      </div>
+      <div class="dont">
+        <div class="vis"><span class="ub" style="font-size:30px;transform:scaleX(1.5);display:inline-block;">extrak</span></div>
+        <div class="txt"><span class="x">✕</span> Não distorcer nem esticar.</div>
+      </div>
+      <div class="dont">
+        <div class="vis"><span style="font-family:Georgia,serif;font-size:30px;font-weight:700;">extrak</span></div>
+        <div class="txt"><span class="x">✕</span> Não trocar a fonte.</div>
+      </div>
+      <div class="dont">
+        <div class="vis" style="background:#888;"><span class="ub" style="font-size:30px;color:#fff;">extrak</span></div>
+        <div class="txt"><span class="x">✕</span> Evitar fundos de baixo contraste.</div>
+      </div>
+      <div class="dont">
+        <div class="vis"><span class="ub" style="font-size:30px;letter-spacing:.25em;">extrak</span></div>
+        <div class="txt"><span class="x">✕</span> Não alterar o tracking.</div>
+      </div>
+      <div class="dont">
+        <div class="vis"><span class="ub" style="font-size:30px;text-shadow:3px 3px 0 #bbb;">extrak</span></div>
+        <div class="txt"><span class="x">✕</span> Sem sombras ou efeitos.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 07 ARQUIVOS -->
+  <section>
+    <div class="kicker">07 — Arquivos</div>
+    <h2>O que vem no pacote</h2>
+    <div class="files">
+      <div>
+        <div class="frow"><b>extrak-ao-lado</b><span>SVG · PNG · ⚫⚪</span></div>
+        <div class="frow"><b>extrak-abaixo</b><span>SVG · PNG · ⚫⚪</span></div>
+        <div class="frow"><b>extrak-avatar</b><span>SVG · PNG · ⚫⚪</span></div>
+      </div>
+      <div>
+        <div class="frow"><b>Fontes</b><span>Unbounded · JetBrains Mono</span></div>
+        <div class="frow"><b>SVG</b><span>fonte embutida · escala livre</span></div>
+        <div class="frow"><b>PNG</b><span>fundo transparente · 4×</span></div>
+      </div>
+    </div>
+    <p class="lede" style="margin-top:30px;">As duas fontes são gratuitas no Google Fonts. Os SVGs têm a fonte embutida (renderizam em qualquer lugar); para impressão, converta o texto em contornos no Figma.</p>
+  </section>
+
+</div>
+</body>
+</html>

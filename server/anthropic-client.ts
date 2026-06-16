@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { ANTHROPIC_KEY_SETTING, getSetting } from "./settings";
 
 const DEFAULT_MODEL = "claude-sonnet-4-5-20250929";
 
@@ -9,16 +10,31 @@ export class AnthropicError extends Error {
   }
 }
 
-function getClient(): Anthropic {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+/**
+ * Resolve a chave da API: prioriza a configurada no Admin (banco) e cai para a
+ * variável de ambiente. Lança se nenhuma estiver disponível.
+ */
+export async function resolveAnthropicKey(): Promise<string> {
+  let apiKey: string | null = null;
+  try {
+    apiKey = await getSetting(ANTHROPIC_KEY_SETTING);
+  } catch {
+    // Falha ao ler do banco não deve impedir o fallback para a env.
+  }
 
-  if (!apiKey || apiKey === "sua_chave_anthropic_aqui") {
+  const resolved = (apiKey && apiKey.trim()) || process.env.ANTHROPIC_API_KEY;
+
+  if (!resolved || resolved === "sua_chave_anthropic_aqui") {
     throw new AnthropicError(
-      "ANTHROPIC_API_KEY não configurado. Defina sua chave no arquivo .env."
+      "Chave da API do Claude não configurada. Defina-a no Admin ou no arquivo .env."
     );
   }
 
-  return new Anthropic({ apiKey });
+  return resolved;
+}
+
+async function getClient(): Promise<Anthropic> {
+  return new Anthropic({ apiKey: await resolveAnthropicKey() });
 }
 
 function getModel(): string {
@@ -36,7 +52,7 @@ async function complete({
   prompt,
   maxTokens = 8000,
 }: CompletionOptions): Promise<string> {
-  const client = getClient();
+  const client = await getClient();
 
   let response: Anthropic.Message;
   try {
@@ -73,6 +89,28 @@ export async function completeText(
   options: CompletionOptions
 ): Promise<string> {
   return complete(options);
+}
+
+/**
+ * Contagem REAL de tokens do input via API da Anthropic (endpoint count_tokens).
+ * Retorna null se a contagem falhar — é usada apenas para observabilidade e
+ * NUNCA deve bloquear a geração.
+ */
+export async function countTokens(options: {
+  system: string;
+  prompt: string;
+}): Promise<number | null> {
+  try {
+    const client = await getClient();
+    const result = await client.messages.countTokens({
+      model: getModel(),
+      system: options.system,
+      messages: [{ role: "user", content: options.prompt }],
+    });
+    return result.input_tokens;
+  } catch {
+    return null;
+  }
 }
 
 /**

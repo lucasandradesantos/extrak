@@ -20,6 +20,6 @@ export function parseFileKey(input: string): string {
   }
 
   throw new ParseUrlError(
-    "URL inválida. Use uma URL do FigJam (ex: https://www.figma.com/board/...) ou a file key diretamente."
+    "URL inválida. Use uma URL do FigJam (https://www.figma.com/board/...) ou do Figma (https://www.figma.com/design/...) ou informe a file key diretamente."
   );
 }

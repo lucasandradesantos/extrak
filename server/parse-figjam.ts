@@ -138,6 +138,58 @@ export function parseFigJamDocument(
   };
 }
 
+const MEANINGFUL_TEXT_TYPES = new Set([
+  "STICKY",
+  "SHAPE_WITH_TEXT",
+  "TEXT",
+  "TABLE_CELL",
+  "WIDGET",
+  "CONNECTOR",
+]);
+
+/**
+ * Versão enxuta do Discovery para a IA: agrupa por seção (path) e mostra só o
+ * texto relevante, sem IDs nem posições, para economizar tokens.
+ */
+export function buildDiscoveryText(parsed: ParsedContent, title?: string): string {
+  const lines: string[] = [];
+  if (title) {
+    lines.push(`# Discovery: ${title}`);
+    lines.push("");
+  }
+
+  const grouped = new Map<string, string[]>();
+  for (const item of parsed.items) {
+    const text = item.text?.trim();
+    if (!text) continue;
+    if (!MEANINGFUL_TEXT_TYPES.has(item.type) && item.type !== "SECTION") {
+      continue;
+    }
+    const key = item.path.length > 0 ? item.path.join(" > ") : "(sem seção)";
+    const list = grouped.get(key) ?? [];
+    list.push(text.replace(/\s+/g, " ").trim());
+    grouped.set(key, list);
+  }
+
+  for (const [section, texts] of grouped) {
+    lines.push(`## ${section}`);
+    for (const text of texts) {
+      lines.push(`- ${text}`);
+    }
+    lines.push("");
+  }
+
+  if (parsed.comments.length > 0) {
+    lines.push("## Comentários");
+    for (const comment of parsed.comments) {
+      lines.push(`- ${comment.user}: ${comment.message.replace(/\s+/g, " ").trim()}`);
+    }
+    lines.push("");
+  }
+
+  return lines.join("\n").trim();
+}
+
 export function formatParsedAsText(parsed: ParsedContent): string {
   const lines: string[] = [];
 

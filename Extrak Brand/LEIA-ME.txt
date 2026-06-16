@@ -1,0 +1,53 @@
+EXTRAK — from figma
+Manual de marca & arquivos · v1.0 (2026)
+==========================================
+
+CONCEITO
+--------
+Extrak extrai o projeto do Figma e roda QA de qualidade com IA sobre o
+discovery + projeto. A identidade é puramente tipográfica, preto & branco,
+minimalista: o "extrak" em Unbounded (display, criativo) encontra a tagline
+em JetBrains Mono (técnico, QA).
+
+LOCKUPS OFICIAIS
+----------------
+• Ao lado  — "extrak" + "from figma" à direita (barras, cabeçalhos, assinaturas)
+• Abaixo   — "from figma" sob o logotipo (selos, usos compactos/centrados)
+• Avatar   — o "e" num quadrado de cantos arredondados (app, favicon, social)
+
+CORES
+-----
+Ink ......... #000000
+Paper ....... #FFFFFF
+Tagline ..... preto a 55% de opacidade
+
+TIPOGRAFIA (gratuita no Google Fonts)
+-------------------------------------
+Logotipo .... Unbounded — Bold 700 — tracking -2%
+              https://fonts.google.com/specimen/Unbounded
+Tagline/UI .. JetBrains Mono — Medium 500 — caixa-alta
+              https://fonts.google.com/specimen/JetBrains+Mono
+
+ARQUIVOS
+--------
+assets/svg/   Vetores escaláveis com a FONTE EMBUTIDA (renderizam em qualquer
+              lugar, sem instalar nada). Ideais para web e Figma.
+assets/png/   Rasters em fundo TRANSPARENTE, 3–4× de resolução.
+
+  extrak-ao-lado-black / -white   (.svg + .png)
+  extrak-abaixo-black  / -white   (.svg + .png)
+  extrak-avatar-dark   / -light   (.svg + .png)
+
+USO
+---
+• Black  = sobre fundos claros.   White/-dark = sobre fundos escuros.
+• Respiro mínimo ao redor da marca = altura do "e".
+• Logotipo não abaixo de 90px de largura; abaixo disso, use só o avatar.
+• Não colorir, distorcer, trocar a fonte, mudar o tracking ou aplicar sombras.
+
+IMPRESSÃO / FIGMA
+-----------------
+Os SVGs trazem a fonte embutida. Para gráfica/offline, abra o SVG no Figma e
+converta o texto em contornos (Outline / "Flatten") antes de exportar.
+
+Abra "Extrak Branding.html" para o manual visual completo.

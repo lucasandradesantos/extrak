@@ -12,7 +12,21 @@ export interface FigmaNode {
     width: number;
     height: number;
   };
+  // Campos de prototipagem (presentes em arquivos Figma Design)
+  transitionNodeID?: string;
+  reactions?: FigmaReaction[];
   children?: FigmaNode[];
+}
+
+export interface FigmaReaction {
+  action?: {
+    type?: string;
+    destinationId?: string;
+    navigation?: string;
+  };
+  trigger?: {
+    type?: string;
+  };
 }
 
 export interface ConnectorEndpoint {
@@ -89,6 +103,27 @@ export interface ParsedContent {
   comments: ParsedComment[];
 }
 
+export interface DesignScreen {
+  id: string;
+  name: string;
+  page: string;
+  texts: string[];
+  transitionsTo: string[];
+}
+
+export interface DesignSummary {
+  pages: number;
+  screens: number;
+  textNodes: number;
+  flows: number;
+}
+
+export interface ParsedDesign {
+  summary: DesignSummary;
+  pages: string[];
+  screens: DesignScreen[];
+}
+
 export interface ExportMetadata {
   name: string;
   lastModified: string;
@@ -109,11 +144,16 @@ export type GapCategoria =
   | "persona_faltante"
   | "inconsistencia"
   | "criterio_nao_testavel"
-  | "pergunta_cliente";
+  | "pergunta_cliente"
+  | "tela_sem_discovery"
+  | "discovery_sem_tela"
+  | "inconsistencia_proto_discovery";
 
 export type GapSeveridade = "alta" | "media" | "baixa";
 
 export type GapStatus = "aberto" | "resolvido";
+
+export type GapSource = "discovery" | "prototype" | "comparacao";
 
 export interface Gap {
   id: string;
@@ -125,7 +165,10 @@ export interface Gap {
   descricao: string;
   sugestao: string;
   status: GapStatus;
+  source: GapSource;
   resposta?: string;
+  figma_reminder_sent_at?: string | null;
+  figma_reminder_node_name?: string | null;
 }
 
 export interface GapDiff {
