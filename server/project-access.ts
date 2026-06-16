@@ -32,6 +32,8 @@ export async function loadProjectForUser(
   return project;
 }
 
+import type { ActorSummary } from "./actors";
+
 export interface GapRow {
   gap_hash: string;
   gap_key: string | null;
@@ -46,10 +48,18 @@ export interface GapRow {
   resposta: string | null;
   figma_reminder_sent_at: string | null;
   figma_reminder_node_name: string | null;
+  resolved_by?: string | null;
+  resolved_at?: string | null;
+  resposta_by?: string | null;
+  resposta_at?: string | null;
+  figma_reminder_sent_by?: string | null;
 }
 
 /** Converte a linha do banco para o shape Gap usado pela IA e pelo cliente. */
-export function mapGapRow(row: GapRow): Gap {
+export function mapGapRow(
+  row: GapRow,
+  actors: Record<string, ActorSummary> = {}
+): Gap {
   return {
     id: row.gap_hash,
     chave: row.gap_key ?? row.gap_hash,
@@ -64,6 +74,13 @@ export function mapGapRow(row: GapRow): Gap {
     resposta: row.resposta ?? undefined,
     figma_reminder_sent_at: row.figma_reminder_sent_at,
     figma_reminder_node_name: row.figma_reminder_node_name,
+    resolved_by: row.resolved_by ? actors[row.resolved_by] ?? null : null,
+    resolved_at: row.resolved_at ?? null,
+    resposta_by: row.resposta_by ? actors[row.resposta_by] ?? null : null,
+    resposta_at: row.resposta_at ?? null,
+    figma_reminder_sent_by: row.figma_reminder_sent_by
+      ? actors[row.figma_reminder_sent_by] ?? null
+      : null,
   };
 }
 

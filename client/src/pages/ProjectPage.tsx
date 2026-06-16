@@ -1,3 +1,4 @@
+import { DeleteOutlined, EditOutlined } from "@ant-design/icons";
 import {
   Alert,
   Button,
@@ -19,8 +20,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useAnalysis } from "../analysis/AnalysisContext";
 import { GapCard } from "../components/GapCard";
+import { ProjectFormModal, type ProjectFormValues } from "../components/ProjectFormModal";
 import { SourceViewPanel } from "../components/SourceViewPanel";
 import { apiFetch } from "../lib/api";
+import { formatActor } from "../lib/actors";
 import {
   SEVERIDADE_LABELS,
   SEVERIDADE_ORDER,
@@ -146,6 +149,11 @@ export function ProjectPage() {
   const [reminderByGapId, setReminderByGapId] = useState<
     Record<string, { sentAt: string; nodeName?: string | null }>
   >({});
+  const [editOpen, setEditOpen] = useState(false);
+  const [savingProject, setSavingProject] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+  const [deletingProject, setDeletingProject] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
   const job = id ? getJob(id) : undefined;
   const analyzing = id ? isRunning(id) : false;
@@ -518,6 +526,48 @@ export function ProjectPage() {
     }
   }
 
+  async function handleUpdateProject(values: ProjectFormValues) {
+    if (!id) return;
+    setSavingProject(true);
+    setEditError(null);
+    try {
+      await apiFetch(`/api/projects/${id}`, {
+        method: "PATCH",
+        body: {
+          name: values.name?.trim(),
+          discoveryUrl: values.discoveryUrl.trim(),
+          prototypeUrl: values.prototypeUrl?.trim() ?? "",
+        },
+        fallback: "Erro ao atualizar projeto.",
+      });
+      setEditOpen(false);
+      message.success("Projeto atualizado");
+      await load();
+    } catch (err) {
+      setEditError(err instanceof Error ? err.message : "Erro ao atualizar projeto.");
+    } finally {
+      setSavingProject(false);
+    }
+  }
+
+  async function handleDeleteProject() {
+    if (!id) return;
+    setDeletingProject(true);
+    try {
+      await apiFetch(`/api/projects/${id}`, {
+        method: "DELETE",
+        fallback: "Erro ao excluir projeto.",
+      });
+      setDeleteOpen(false);
+      message.success("Projeto excluído");
+      navigate("/");
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "Erro ao excluir projeto.");
+    } finally {
+      setDeletingProject(false);
+    }
+  }
+
   if (loading) {
     return (
       <div style={{ display: "grid", placeItems: "center", minHeight: 240 }}>
@@ -544,14 +594,43 @@ export function ProjectPage() {
   ];
 
   return (
+    <>
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
       <div>
         <Button type="link" onClick={() => navigate("/")} style={{ paddingLeft: 0 }}>
           ← Projetos
         </Button>
-        <Title level={2} style={{ margin: "4px 0 0" }}>
-          {detail.project.name}
-        </Title>
+        <Flex justify="space-between" align="flex-start" wrap="wrap" gap={12}>
+          <div>
+            <Title level={2} style={{ margin: "4px 0 0" }}>
+              {detail.project.name}
+            </Title>
+            {detail.project.created_by && (
+              <Text type="secondary" style={{ fontSize: 13 }}>
+                Projeto criado por {formatActor(detail.project.created_by)} ·{" "}
+                {formatDateTime(detail.project.created_at)}
+              </Text>
+            )}
+          </div>
+          <Space>
+            <Button
+              icon={<EditOutlined />}
+              onClick={() => {
+                setEditError(null);
+                setEditOpen(true);
+              }}
+            >
+              Editar
+            </Button>
+            <Button
+              danger
+              icon={<DeleteOutlined />}
+              onClick={() => setDeleteOpen(true)}
+            >
+              Excluir
+            </Button>
+          </Space>
+        </Flex>
       </div>
 
       {starting && !progress && (
@@ -803,6 +882,11 @@ export function ProjectPage() {
                         <Text type="secondary" style={{ fontSize: 12 }}>
                           {formatDateTime(item.created_at)}
                         </Text>
+                        {item.created_by && (
+                          <Text type="secondary" style={{ fontSize: 12 }}>
+                            por {formatActor(item.created_by)}
+                          </Text>
+                        )}
                         <Tag>{item.status}</Tag>
                       </Flex>
                     ),
@@ -925,6 +1009,48 @@ export function ProjectPage() {
         </Card>
       )}
     </Space>
+
+    <ProjectFormModal
+      open={editOpen}
+      mode="edit"
+      project={detail.project}
+      loading={savingProject}
+      error={editError}
+      onCancel={() => {
+        setEditOpen(false);
+        setEditError(null);
+      }}
+      onSubmit={handleUpdateProject}
+    />
+
+    <Modal
+      title="Excluir projeto?"
+      open={deleteOpen}
+      onCancel={() => !deletingProject && setDeleteOpen(false)}
+      footer={[
+        <Button key="cancel" onClick={() => setDeleteOpen(false)} disabled={deletingProject}>
+          Cancelar
+        </Button>,
+        <Button
+          key="delete"
+          type="primary"
+          danger
+          loading={deletingProject}
+          onClick={handleDeleteProject}
+        >
+          Excluir projeto
+        </Button>,
+      ]}
+    >
+      <Paragraph>
+        Tem certeza que deseja excluir <strong>{detail.project.name}</strong>?
+      </Paragraph>
+      <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+        Esta ação é permanente e remove análises, gaps, PRDs e todo o histórico
+        associado a este projeto.
+      </Paragraph>
+    </Modal>
+    </>
   );
 }
 
@@ -980,6 +1106,12 @@ function CompareView({
     <div>
       <Paragraph type="secondary">
         Comparando rodada #{result.from.round} → #{result.to.round}
+        {result.from.created_by && (
+          <> · de: {formatActor(result.from.created_by)}</>
+        )}
+        {result.to.created_by && (
+          <> · para: {formatActor(result.to.created_by)}</>
+        )}
         {boardChanged && (
           <Tag color="processing" style={{ marginLeft: 8 }}>
             Board atualizado

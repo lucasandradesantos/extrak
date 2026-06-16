@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { pickActor, resolveActors } from "../actors";
 import { AnthropicError } from "../anthropic-client";
 import type { AuthedRequest } from "../auth";
 import {
@@ -171,6 +172,7 @@ analysisRouter.post("/:id/analyze", async (req: AuthedRequest, res) => {
       discovery_snapshot: discovery,
       prototype_snapshot: prototype,
       source_metadata: sourceMetadata,
+      created_by: req.authUser?.id ?? null,
     })
     .select("*")
     .single();
@@ -359,9 +361,11 @@ analysisRouter.get("/:id/analyses", async (req: AuthedRequest, res) => {
   const admin = getSupabaseAdmin();
   const { data: rounds } = await admin
     .from("analyses")
-    .select("id, round, status, created_at, source_metadata")
+    .select("id, round, status, created_at, source_metadata, created_by")
     .eq("project_id", project.id)
     .order("round", { ascending: false });
+
+  const roundActors = await resolveActors((rounds ?? []).map((round) => round.created_by));
 
   const items = await Promise.all(
     (rounds ?? []).map(async (round) => {
@@ -376,6 +380,7 @@ analysisRouter.get("/:id/analyses", async (req: AuthedRequest, res) => {
         status: round.status,
         created_at: round.created_at,
         source_metadata: round.source_metadata ?? null,
+        created_by: pickActor(roundActors, round.created_by),
         total: counts.alta + counts.media + counts.baixa,
         counts,
       };
@@ -403,7 +408,7 @@ analysisRouter.get("/:id/analyses/compare", async (req: AuthedRequest, res) => {
   const admin = getSupabaseAdmin();
   const { data: rounds } = await admin
     .from("analyses")
-    .select("id, round, project_id, created_at, source_metadata")
+    .select("id, round, project_id, created_at, source_metadata, created_by")
     .in("id", [from, to]);
 
   const fromRound = rounds?.find((r) => r.id === from);
@@ -417,6 +422,8 @@ analysisRouter.get("/:id/analyses/compare", async (req: AuthedRequest, res) => {
     res.status(404).json({ error: "Rodada(s) não encontrada(s) neste projeto." });
     return;
   }
+
+  const compareActors = await resolveActors([fromRound.created_by, toRound.created_by]);
 
   const [gapsFrom, gapsTo] = await Promise.all([
     readGaps(from),
@@ -435,12 +442,14 @@ analysisRouter.get("/:id/analyses/compare", async (req: AuthedRequest, res) => {
       round: fromRound.round,
       created_at: fromRound.created_at,
       source_metadata: fromRound.source_metadata ?? null,
+      created_by: pickActor(compareActors, fromRound.created_by),
     },
     to: {
       id: toRound.id,
       round: toRound.round,
       created_at: toRound.created_at,
       source_metadata: toRound.source_metadata ?? null,
+      created_by: pickActor(compareActors, toRound.created_by),
     },
     resolved: pick(diff.resolvidos),
     new: pick(diff.novos),
@@ -471,12 +480,14 @@ analysisRouter.get("/:id/analyses/:analysisId", async (req: AuthedRequest, res) 
   }
 
   const gaps = await readGaps(round.id);
+  const roundActors = await resolveActors([round.created_by]);
   res.json({
     id: round.id,
     round: round.round,
     status: round.status,
     created_at: round.created_at,
     source_metadata: round.source_metadata ?? null,
+    created_by: pickActor(roundActors, round.created_by),
     gaps,
     ...(includeText
       ? {
@@ -512,10 +523,30 @@ analysisRouter.patch("/:id/gaps", async (req: AuthedRequest, res) => {
     ...Object.keys(statuses ?? {}),
   ]);
 
+  const userId = req.authUser?.id;
+  const now = new Date().toISOString();
+
   for (const gapId of ids) {
     const update: Record<string, unknown> = {};
-    if (responses && gapId in responses) update.resposta = responses[gapId];
-    if (statuses && gapId in statuses) update.status = statuses[gapId];
+    if (responses && gapId in responses) {
+      update.resposta = responses[gapId];
+      if (userId) {
+        update.resposta_by = userId;
+        update.resposta_at = now;
+      }
+    }
+    if (statuses && gapId in statuses) {
+      update.status = statuses[gapId];
+      if (statuses[gapId] === "resolvido") {
+        if (userId) {
+          update.resolved_by = userId;
+          update.resolved_at = now;
+        }
+      } else if (statuses[gapId] === "aberto") {
+        update.resolved_by = null;
+        update.resolved_at = null;
+      }
+    }
     if (Object.keys(update).length === 0) continue;
     await admin
       .from("gaps")
@@ -582,6 +613,7 @@ analysisRouter.post("/:id/gaps/:gapId/figma-reminder", async (req: AuthedRequest
       .update({
         figma_reminder_sent_at: sentAt,
         figma_reminder_node_name: result.nodeName,
+        figma_reminder_sent_by: req.authUser?.id ?? null,
       })
       .eq("analysis_id", analysis.id)
       .eq("gap_hash", gap.id);
@@ -685,7 +717,11 @@ async function readGaps(analysisId: string): Promise<Gap[]> {
     .from("gaps")
     .select("*")
     .eq("analysis_id", analysisId);
-  return ((data ?? []) as GapRow[]).map(mapGapRow);
+  const rows = (data ?? []) as GapRow[];
+  const actors = await resolveActors(
+    rows.flatMap((row) => [row.resolved_by, row.resposta_by, row.figma_reminder_sent_by])
+  );
+  return rows.map((row) => mapGapRow(row, actors));
 }
 
 async function finishJob(jobId: string, analysisId: string): Promise<void> {

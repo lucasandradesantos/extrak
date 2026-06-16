@@ -6,6 +6,7 @@ import {
   SEVERIDADE_LABELS,
   SOURCE_LABELS,
 } from "../lib/labels";
+import { formatActorAt } from "../lib/actors";
 import type { Gap, GapSeveridade, GapSource, GapStatus } from "../types";
 
 const { Text, Paragraph } = Typography;
@@ -155,6 +156,14 @@ export function GapCard({
                 style={{ marginBottom: 12, whiteSpace: "pre-wrap" }}
               >
                 <Text strong>Comentário:</Text> {resposta ?? gap.resposta}
+                {(gap.resposta_by || gap.resposta_at) && (
+                  <>
+                    {" "}
+                    <Text type="secondary">
+                      (por {formatActorAt(gap.resposta_by, gap.resposta_at)})
+                    </Text>
+                  </>
+                )}
               </Paragraph>
             )}
 
@@ -227,6 +236,11 @@ export function GapCard({
                   <Paragraph style={{ margin: "4px 0 0", whiteSpace: "pre-wrap" }}>
                     {resposta ?? gap.resposta}
                   </Paragraph>
+                  {(gap.resposta_by || gap.resposta_at) && (
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      Por {formatActorAt(gap.resposta_by, gap.resposta_at)}
+                    </Text>
+                  )}
                 </div>
               ) : (
                 <div>
@@ -239,15 +253,24 @@ export function GapCard({
                 </div>
               )}
 
+              {isResolved && (gap.resolved_by || gap.resolved_at) && (
+                <div>
+                  <Text type="secondary" style={{ fontSize: 11, letterSpacing: "0.06em" }}>
+                    RESOLVIDO POR
+                  </Text>
+                  <Paragraph style={{ margin: "4px 0 0", fontSize: 13 }}>
+                    {formatActorAt(gap.resolved_by, gap.resolved_at)}
+                  </Paragraph>
+                </div>
+              )}
+
               {reminderSent && (
                 <div>
                   <Text type="secondary" style={{ fontSize: 11, letterSpacing: "0.06em" }}>
                     LEMBRETE NO FIGMA
                   </Text>
                   <Paragraph style={{ margin: "4px 0 0", fontSize: 13 }}>
-                    Enviado
-                    {gap.figma_reminder_sent_at &&
-                      ` · ${formatReminderDate(gap.figma_reminder_sent_at)}`}
+                    {formatActorAt(gap.figma_reminder_sent_by, gap.figma_reminder_sent_at ?? undefined)}
                     {gap.figma_reminder_node_name && ` · ${gap.figma_reminder_node_name}`}
                   </Paragraph>
                 </div>

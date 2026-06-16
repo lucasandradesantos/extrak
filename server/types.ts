@@ -155,6 +155,13 @@ export type GapStatus = "aberto" | "resolvido";
 
 export type GapSource = "discovery" | "prototype" | "comparacao";
 
+export interface ActorSummary {
+  id: string;
+  full_name: string | null;
+  email: string | null;
+  label: string;
+}
+
 export interface Gap {
   id: string;
   chave: string;
@@ -169,6 +176,11 @@ export interface Gap {
   resposta?: string;
   figma_reminder_sent_at?: string | null;
   figma_reminder_node_name?: string | null;
+  resolved_by?: ActorSummary | null;
+  resolved_at?: string | null;
+  resposta_by?: ActorSummary | null;
+  resposta_at?: string | null;
+  figma_reminder_sent_by?: ActorSummary | null;
 }
 
 export interface GapDiff {

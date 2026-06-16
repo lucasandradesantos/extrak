@@ -39,6 +39,13 @@ export type GapStatus = "aberto" | "resolvido";
 
 export type GapSource = "discovery" | "prototype" | "comparacao";
 
+export interface ActorSummary {
+  id: string;
+  full_name: string | null;
+  email: string | null;
+  label: string;
+}
+
 export interface Gap {
   id: string;
   chave: string;
@@ -53,6 +60,11 @@ export interface Gap {
   resposta?: string;
   figma_reminder_sent_at?: string | null;
   figma_reminder_node_name?: string | null;
+  resolved_by?: ActorSummary | null;
+  resolved_at?: string | null;
+  resposta_by?: ActorSummary | null;
+  resposta_at?: string | null;
+  figma_reminder_sent_by?: ActorSummary | null;
 }
 
 export interface ProjectSummary {
@@ -66,6 +78,7 @@ export interface ProjectSummary {
   prototype_file_key?: string | null;
   created_at: string;
   updated_at: string;
+  created_by?: ActorSummary | null;
   analysis_status?: "pending" | "running" | "done" | "error" | null;
   analysis_progress?: { processed: number; total: number } | null;
 }
@@ -110,6 +123,7 @@ export interface AnalysisRow {
   id: string;
   round: number;
   status: string;
+  created_by?: ActorSummary | null;
 }
 
 export interface ProjectDetail {
@@ -139,6 +153,7 @@ export interface AnalysisHistoryItem {
   status: string;
   created_at: string;
   source_metadata: AnalysisSourceMetadata | null;
+  created_by?: ActorSummary | null;
   total: number;
   counts: { alta: number; media: number; baixa: number };
 }
@@ -148,6 +163,7 @@ export interface AnalysisCompareRound {
   round: number;
   created_at: string;
   source_metadata: AnalysisSourceMetadata | null;
+  created_by?: ActorSummary | null;
 }
 
 export interface AnalysisCompareResult {

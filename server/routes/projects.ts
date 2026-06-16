@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { pickActor, resolveActors } from "../actors";
 import type { AuthedRequest } from "../auth";
 import { extractDiscovery, extractPrototype } from "../figma-service";
 import { buildProjectPreview } from "../figma-preview";
@@ -125,7 +126,9 @@ projectsRouter.get("/", async (req: AuthedRequest, res) => {
   const admin = getSupabaseAdmin();
   let query = admin
     .from("projects")
-    .select("id, name, team_id, status, discovery_url, prototype_url, created_at, updated_at")
+    .select(
+      "id, name, team_id, status, discovery_url, prototype_url, created_at, updated_at, created_by"
+    )
     .order("updated_at", { ascending: false });
 
   if (!isSuper(req)) {
@@ -144,6 +147,7 @@ projectsRouter.get("/", async (req: AuthedRequest, res) => {
 
   const projects = data ?? [];
   const ids = projects.map((p) => p.id);
+  const projectActors = await resolveActors(projects.map((p) => p.created_by));
 
   let jobByProject = new Map<
     string,
@@ -168,6 +172,7 @@ projectsRouter.get("/", async (req: AuthedRequest, res) => {
     const job = jobByProject.get(p.id);
     return {
       ...p,
+      created_by: pickActor(projectActors, p.created_by),
       analysis_status: job?.status ?? null,
       analysis_progress: job
         ? { processed: job.processed_chunks, total: job.total_chunks }
@@ -247,7 +252,15 @@ projectsRouter.get("/:id", async (req: AuthedRequest, res) => {
       .select("*")
       .eq("analysis_id", latestAnalysis.id)
       .order("severidade");
-    gaps = ((gapRows ?? []) as GapRow[]).map(mapGapRow);
+    const rows = (gapRows ?? []) as GapRow[];
+    const gapActors = await resolveActors(
+      rows.flatMap((row) => [
+        row.resolved_by,
+        row.resposta_by,
+        row.figma_reminder_sent_by,
+      ])
+    );
+    gaps = rows.map((row) => mapGapRow(row, gapActors));
 
     const { data: jobRow } = await admin
       .from("analysis_jobs")
@@ -256,6 +269,11 @@ projectsRouter.get("/:id", async (req: AuthedRequest, res) => {
       .maybeSingle();
     job = jobRow;
   }
+
+  const detailActors = await resolveActors([
+    project.created_by,
+    latestAnalysis?.created_by,
+  ]);
 
   const { data: latestPrd } = await admin
     .from("prds")
@@ -266,13 +284,182 @@ projectsRouter.get("/:id", async (req: AuthedRequest, res) => {
     .maybeSingle();
 
   res.json({
-    project,
+    project: {
+      ...project,
+      created_by: pickActor(detailActors, project.created_by),
+    },
     sources: sources ?? [],
-    analysis: latestAnalysis ?? null,
+    analysis: latestAnalysis
+      ? {
+          ...latestAnalysis,
+          created_by: pickActor(detailActors, latestAnalysis.created_by),
+        }
+      : null,
     gaps,
     job,
     prd: latestPrd ?? null,
   });
+});
+
+// Atualiza nome e/ou URLs do projeto. Se as URLs mudarem, re-extrai do Figma.
+projectsRouter.patch("/:id", async (req: AuthedRequest, res) => {
+  const project = await loadProjectForUser(req, req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Projeto não encontrado." });
+    return;
+  }
+
+  const { name, discoveryUrl, prototypeUrl } = req.body as {
+    name?: string;
+    discoveryUrl?: string;
+    prototypeUrl?: string;
+  };
+
+  if (name === undefined && discoveryUrl === undefined && prototypeUrl === undefined) {
+    res.status(400).json({ error: "Nenhum campo para atualizar." });
+    return;
+  }
+
+  const admin = getSupabaseAdmin();
+  const updates: Record<string, unknown> = {
+    updated_at: new Date().toISOString(),
+  };
+
+  if (name !== undefined) {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      res.status(400).json({ error: "O nome do projeto não pode ser vazio." });
+      return;
+    }
+    updates.name = trimmed;
+  }
+
+  let discoveryKey = project.discovery_file_key as string;
+  let prototypeKey = (project.prototype_file_key as string | null) ?? null;
+  let sourcesChanged = false;
+
+  if (discoveryUrl !== undefined) {
+    const trimmed = discoveryUrl.trim();
+    if (!trimmed) {
+      res.status(400).json({ error: "A URL do Discovery é obrigatória." });
+      return;
+    }
+    try {
+      const key = parseFileKey(trimmed);
+      if (key !== project.discovery_file_key || trimmed !== project.discovery_url) {
+        discoveryKey = key;
+        updates.discovery_url = trimmed;
+        updates.discovery_file_key = key;
+        sourcesChanged = true;
+      }
+    } catch (error) {
+      if (error instanceof ParseUrlError) {
+        res.status(400).json({ error: error.message });
+        return;
+      }
+      throw error;
+    }
+  }
+
+  if (prototypeUrl !== undefined) {
+    const trimmed = prototypeUrl.trim();
+    if (trimmed) {
+      try {
+        const key = parseFileKey(trimmed);
+        if (key !== project.prototype_file_key || trimmed !== project.prototype_url) {
+          prototypeKey = key;
+          updates.prototype_url = trimmed;
+          updates.prototype_file_key = key;
+          sourcesChanged = true;
+        }
+      } catch (error) {
+        if (error instanceof ParseUrlError) {
+          res.status(400).json({ error: error.message });
+          return;
+        }
+        throw error;
+      }
+    } else if (project.prototype_file_key || project.prototype_url) {
+      prototypeKey = null;
+      updates.prototype_url = null;
+      updates.prototype_file_key = null;
+      sourcesChanged = true;
+    }
+  }
+
+  try {
+    if (sourcesChanged) {
+      const discovery = await extractDiscovery(discoveryKey);
+      const prototype = prototypeKey ? await extractPrototype(prototypeKey) : null;
+
+      await admin
+        .from("project_sources")
+        .upsert(
+          [
+            {
+              project_id: project.id,
+              kind: "discovery",
+              figma_file_key: discoveryKey,
+              metadata: discovery.metadata,
+              discovery_text: discovery.text,
+            },
+          ],
+          { onConflict: "project_id,kind" }
+        );
+
+      if (prototype && prototypeKey) {
+        await admin.from("project_sources").upsert(
+          [
+            {
+              project_id: project.id,
+              kind: "prototype",
+              figma_file_key: prototypeKey,
+              metadata: prototype.metadata,
+              discovery_text: prototype.text,
+            },
+          ],
+          { onConflict: "project_id,kind" }
+        );
+      } else {
+        await admin
+          .from("project_sources")
+          .delete()
+          .eq("project_id", project.id)
+          .eq("kind", "prototype");
+      }
+    }
+
+    const { data: updated, error } = await admin
+      .from("projects")
+      .update(updates)
+      .eq("id", project.id)
+      .select("*")
+      .single();
+
+    if (error || !updated) {
+      res.status(500).json({ error: "Erro ao atualizar o projeto." });
+      return;
+    }
+
+    const actors = await resolveActors([updated.created_by]);
+    res.json({
+      project: {
+        ...updated,
+        created_by: pickActor(actors, updated.created_by),
+      },
+    });
+  } catch (error) {
+    if (error instanceof FigmaApiError) {
+      const status =
+        error.statusCode === 403 ? 403 : error.statusCode === 404 ? 404 : 502;
+      res.status(status).json({ error: error.message });
+      return;
+    }
+    console.error("Erro ao atualizar projeto:", error);
+    res
+      .status(500)
+      .json({ error: error instanceof Error ? error.message : "Erro interno." });
+  }
 });
 
 projectsRouter.delete("/:id", async (req: AuthedRequest, res) => {

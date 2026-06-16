@@ -5,11 +5,10 @@ import {
   Card,
   Empty,
   Flex,
-  Form,
   Input,
   List,
-  Modal,
   Select,
+  Space,
   Spin,
   Tag,
   Typography,
@@ -17,10 +16,12 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAnalysis } from "../analysis/AnalysisContext";
+import { ProjectFormModal, type ProjectFormValues } from "../components/ProjectFormModal";
 import { apiFetch } from "../lib/api";
+import { formatActor } from "../lib/actors";
 import type { ProjectSummary } from "../types";
 
-const { Paragraph, Text, Title } = Typography;
+const { Text, Title } = Typography;
 
 type ProjectFilter = "all" | "analyzing" | "with-prototype" | "discovery-only";
 
@@ -41,7 +42,6 @@ export function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<ProjectFilter>("all");
-  const [form] = Form.useForm();
 
   async function loadProjects() {
     setLoadingList(true);
@@ -92,15 +92,10 @@ export function DashboardPage() {
 
   function closeModal() {
     setModalOpen(false);
-    form.resetFields();
     setError(null);
   }
 
-  async function handleCreate(values: {
-    name?: string;
-    discoveryUrl: string;
-    prototypeUrl?: string;
-  }) {
+  async function handleCreate(values: ProjectFormValues) {
     setCreating(true);
     setError(null);
     try {
@@ -133,6 +128,10 @@ export function DashboardPage() {
             Novo projeto
           </Button>
         </Flex>
+
+        {error && !modalOpen && (
+          <Alert type="error" message={error} showIcon style={{ marginBottom: 16 }} />
+        )}
 
         {projects.length > 0 && (
           <Flex wrap="wrap" gap={12} style={{ marginBottom: 16 }}>
@@ -182,13 +181,20 @@ export function DashboardPage() {
                 <List.Item.Meta
                   title={p.name}
                   description={
-                    isProjectAnalyzing(p) ? (
-                      <Tag color="processing">Analisando… {projectProgress(p)}</Tag>
-                    ) : p.prototype_url ? (
-                      "Discovery + Protótipo"
-                    ) : (
-                      "Somente Discovery"
-                    )
+                    <Space direction="vertical" size={2}>
+                      {p.created_by && (
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          Criado por {formatActor(p.created_by)}
+                        </Text>
+                      )}
+                      {isProjectAnalyzing(p) ? (
+                        <Tag color="processing">Analisando… {projectProgress(p)}</Tag>
+                      ) : p.prototype_url ? (
+                        <Text type="secondary">Discovery + Protótipo</Text>
+                      ) : (
+                        <Text type="secondary">Somente Discovery</Text>
+                      )}
+                    </Space>
                   }
                 />
               </List.Item>
@@ -197,48 +203,14 @@ export function DashboardPage() {
         )}
       </Card>
 
-      <Modal
-        title="Novo projeto"
+      <ProjectFormModal
         open={modalOpen}
+        mode="create"
+        loading={creating}
+        error={error}
         onCancel={closeModal}
-        footer={null}
-        destroyOnHidden
-        width={520}
-      >
-        <Paragraph type="secondary" style={{ marginBottom: 16 }}>
-          Informe a URL do Discovery (FigJam) e, opcionalmente, a do Protótipo (Figma).
-          A plataforma extrai os dois e a IA compara para encontrar gaps.
-        </Paragraph>
-
-        {error && <Alert type="error" message={error} showIcon style={{ marginBottom: 16 }} />}
-
-        <Form form={form} layout="vertical" onFinish={handleCreate} requiredMark={false}>
-          <Form.Item label="Nome do projeto (opcional)" name="name">
-            <Input placeholder="Deixe em branco para usar o nome do board" />
-          </Form.Item>
-
-          <Form.Item
-            label="URL do Discovery (FigJam)"
-            name="discoveryUrl"
-            rules={[{ required: true, message: "Informe a URL do Discovery." }]}
-          >
-            <Input placeholder="https://www.figma.com/board/..." />
-          </Form.Item>
-
-          <Form.Item label="URL do Protótipo (Figma) — opcional" name="prototypeUrl">
-            <Input placeholder="https://www.figma.com/design/..." />
-          </Form.Item>
-
-          <Flex justify="flex-end" gap={8}>
-            <Button onClick={closeModal} disabled={creating}>
-              Cancelar
-            </Button>
-            <Button type="primary" htmlType="submit" loading={creating}>
-              {creating ? "Extraindo..." : "Criar projeto"}
-            </Button>
-          </Flex>
-        </Form>
-      </Modal>
+        onSubmit={handleCreate}
+      />
     </>
   );
 }
