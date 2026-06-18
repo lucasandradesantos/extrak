@@ -103,12 +103,22 @@ export interface ParsedContent {
   comments: ParsedComment[];
 }
 
+export interface DesignTransitionDetail {
+  destinationId: string;
+  trigger?: string;
+  action?: string;
+}
+
 export interface DesignScreen {
   id: string;
   name: string;
   page: string;
+  sectionPath?: string;
+  dimensions?: { width: number; height: number };
   texts: string[];
+  labels?: string[];
   transitionsTo: string[];
+  transitionDetails?: DesignTransitionDetail[];
 }
 
 export interface DesignSummary {

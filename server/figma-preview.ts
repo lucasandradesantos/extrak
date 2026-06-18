@@ -1,10 +1,10 @@
 import { fetchFigmaFile, fetchFigmaImages } from "./figma-client";
 import type { SourceKind } from "./figma-service";
+import { collectDesignScreenNodes } from "./parse-figma-design";
 import type { FigmaNode } from "./types";
 
 const MAX_PREVIEW_NODES = 20;
 const IMAGE_BATCH_SIZE = 30;
-const SCREEN_TYPES = new Set(["FRAME", "COMPONENT", "COMPONENT_SET"]);
 const DISCOVERY_PREVIEW_TYPES = new Set(["SECTION", "FRAME"]);
 
 export interface PreviewNodeRef {
@@ -39,6 +39,16 @@ export function collectPreviewNodes(
   document: FigmaNode,
   kind: SourceKind
 ): PreviewNodeRef[] {
+  if (kind === "prototype") {
+    return collectDesignScreenNodes(document)
+      .slice(0, MAX_PREVIEW_NODES)
+      .map((screen) => ({
+        id: screen.id,
+        name: screen.name,
+        page: screen.page,
+      }));
+  }
+
   const nodes: PreviewNodeRef[] = [];
 
   for (const page of document.children ?? []) {
@@ -48,22 +58,7 @@ export function collectPreviewNodes(
     for (const child of page.children ?? []) {
       if (nodes.length >= MAX_PREVIEW_NODES) break;
 
-      if (kind === "prototype") {
-        if (SCREEN_TYPES.has(child.type)) {
-          nodes.push({ id: child.id, name: child.name, page: pageName });
-        } else if (child.type === "SECTION") {
-          for (const inner of child.children ?? []) {
-            if (nodes.length >= MAX_PREVIEW_NODES) break;
-            if (SCREEN_TYPES.has(inner.type)) {
-              nodes.push({
-                id: inner.id,
-                name: inner.name,
-                page: `${pageName} › ${child.name}`,
-              });
-            }
-          }
-        }
-      } else if (DISCOVERY_PREVIEW_TYPES.has(child.type)) {
+      if (DISCOVERY_PREVIEW_TYPES.has(child.type)) {
         nodes.push({ id: child.id, name: child.name, page: pageName });
       }
     }

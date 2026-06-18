@@ -20,7 +20,7 @@ export const MAX_DISCOVERY_CHARS = Math.floor(
   MAX_DISCOVERY_TOKENS * CHARS_PER_TOKEN
 );
 // Protótipo enviado na etapa de comparação (truncado por telas inteiras).
-const MAX_PROTOTYPE_CHARS = 50_000;
+const MAX_PROTOTYPE_CHARS = 120_000;
 // PRD e comparação recebem o Discovery COMPLETO; o teto só evita estourar a
 // janela de contexto do modelo (~200k tokens) em casos extremos.
 export const MAX_FULL_DISCOVERY_CHARS = 320_000;

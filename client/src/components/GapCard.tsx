@@ -284,28 +284,31 @@ export function GapCard({
         title="Marcar gap como resolvido"
         open={resolveOpen}
         onCancel={() => setResolveOpen(false)}
-        footer={[
-          <Button key="cancel" onClick={() => setResolveOpen(false)} disabled={savingResolve}>
-            Cancelar
-          </Button>,
-          <Button
-            key="resolve"
-            onClick={() => handleMarkResolved(false)}
-            loading={savingResolve}
-            disabled={!resolveComment.trim()}
-          >
-            Marcar como resolvido
-          </Button>,
-          <Button
-            key="reanalyze"
-            type="primary"
-            onClick={() => handleMarkResolved(true)}
-            loading={savingResolve}
-            disabled={!resolveComment.trim()}
-          >
-            Marcar e analisar com feedback
-          </Button>,
-        ]}
+        width={480}
+        footer={
+          <Flex vertical gap={8} style={{ width: "100%" }}>
+            <Button
+              type="primary"
+              block
+              onClick={() => handleMarkResolved(true)}
+              loading={savingResolve}
+              disabled={!resolveComment.trim()}
+            >
+              Marcar e analisar com feedback
+            </Button>
+            <Button
+              block
+              onClick={() => handleMarkResolved(false)}
+              loading={savingResolve}
+              disabled={!resolveComment.trim()}
+            >
+              Marcar como resolvido
+            </Button>
+            <Button block onClick={() => setResolveOpen(false)} disabled={savingResolve}>
+              Cancelar
+            </Button>
+          </Flex>
+        }
       >
         <Paragraph type="secondary" style={{ marginBottom: 12 }}>
           Descreva o que foi feito para endereçar este gap. O comentário fica registrado

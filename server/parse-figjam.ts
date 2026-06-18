@@ -144,12 +144,39 @@ const MEANINGFUL_TEXT_TYPES = new Set([
   "TEXT",
   "TABLE_CELL",
   "WIDGET",
-  "CONNECTOR",
+  "SECTION",
 ]);
 
+function itemContent(item: ParsedItem): string | null {
+  const text = item.text?.replace(/\s+/g, " ").trim();
+  if (text) return text;
+
+  if (item.type === "SECTION") return item.name?.trim() || null;
+
+  const name = item.name?.trim();
+  if (!name || /^(rectangle|shape|frame|group|\d+)$/i.test(name)) {
+    return null;
+  }
+  return name;
+}
+
+function resolveConnectorLabel(
+  endpoint: ParsedItem["connectorStart"],
+  byId: Map<string, ParsedItem>
+): string {
+  const nodeId = endpoint?.endpointNodeId;
+  if (!nodeId) return "?";
+  const item = byId.get(nodeId);
+  if (!item) return nodeId;
+  const label = item.text?.trim() || item.name;
+  const where =
+    item.path.length > 0 ? ` [${item.path.join(" > ")}]` : "";
+  return `${label}${where}`;
+}
+
 /**
- * Versão enxuta do Discovery para a IA: agrupa por seção (path) e mostra só o
- * texto relevante, sem IDs nem posições, para economizar tokens.
+ * Versão estruturada do Discovery para a IA: agrupa por seção, inclui nomes
+ * quando não há texto, fluxos de conectores e comentários.
  */
 export function buildDiscoveryText(parsed: ParsedContent, title?: string): string {
   const lines: string[] = [];
@@ -158,23 +185,51 @@ export function buildDiscoveryText(parsed: ParsedContent, title?: string): strin
     lines.push("");
   }
 
+  const summary = parsed.summary;
+  lines.push(
+    `Resumo: ${summary.stickies} sticky(s), ${summary.shapes} shape(s), ${summary.connectors} conector(es), ${summary.textNodes} texto(s), ${summary.sections} seção(ões), ${summary.comments} comentário(s).`
+  );
+  lines.push("");
+
   const grouped = new Map<string, string[]>();
   for (const item of parsed.items) {
-    const text = item.text?.trim();
-    if (!text) continue;
-    if (!MEANINGFUL_TEXT_TYPES.has(item.type) && item.type !== "SECTION") {
-      continue;
-    }
+    if (item.type === "CONNECTOR") continue;
+
+    const content = itemContent(item);
+    if (!content) continue;
+    if (!MEANINGFUL_TEXT_TYPES.has(item.type)) continue;
+
     const key = item.path.length > 0 ? item.path.join(" > ") : "(sem seção)";
     const list = grouped.get(key) ?? [];
-    list.push(text.replace(/\s+/g, " ").trim());
+    list.push(content);
     grouped.set(key, list);
   }
 
   for (const [section, texts] of grouped) {
     lines.push(`## ${section}`);
+    const seen = new Set<string>();
     for (const text of texts) {
+      const key = text.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
       lines.push(`- ${text}`);
+    }
+    lines.push("");
+  }
+
+  const connectors = parsed.items.filter((i) => i.type === "CONNECTOR");
+  if (connectors.length > 0) {
+    const byId = new Map(parsed.items.map((i) => [i.id, i]));
+    lines.push("## Fluxos (conectores)");
+    for (const connector of connectors) {
+      const from = resolveConnectorLabel(connector.connectorStart, byId);
+      const to = resolveConnectorLabel(connector.connectorEnd, byId);
+      const label = connector.text?.trim();
+      if (label) {
+        lines.push(`- ${from} → ${to} (${label})`);
+      } else {
+        lines.push(`- ${from} → ${to}`);
+      }
     }
     lines.push("");
   }
