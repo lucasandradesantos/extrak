@@ -1,6 +1,7 @@
 import "dotenv/config";
 import cors from "cors";
 import express from "express";
+import { probeAnthropicCredits } from "./anthropic-client";
 import { type AuthedRequest, requireAuth } from "./auth";
 import { adminRouter } from "./routes/admin";
 import { analysisRouter } from "./routes/analysis";
@@ -20,6 +21,16 @@ app.get("/api/health", (_req, res) => {
 // Perfil do usuário autenticado (papel + time) para o frontend.
 app.get("/api/me", requireAuth, (req: AuthedRequest, res) => {
   res.json({ profile: req.profile, email: req.authUser?.email });
+});
+
+// Status leve da conta Anthropic (sem saldo em dólares — API não expõe isso).
+app.get("/api/ai/status", requireAuth, async (_req, res) => {
+  try {
+    const status = await probeAnthropicCredits();
+    res.json(status);
+  } catch {
+    res.json({ ok: true });
+  }
 });
 
 // Admin: o /bootstrap é público; as demais rotas exigem auth (tratado no router).

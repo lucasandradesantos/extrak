@@ -23,6 +23,7 @@ import { GapCard } from "../components/GapCard";
 import { ProjectFormModal, type ProjectFormValues } from "../components/ProjectFormModal";
 import { SourceViewPanel } from "../components/SourceViewPanel";
 import { apiFetch } from "../lib/api";
+import { humanizeApiError } from "../lib/humanizeApiError";
 import { formatActor } from "../lib/actors";
 import {
   SEVERIDADE_LABELS,
@@ -659,7 +660,7 @@ export function ProjectPage() {
       )}
 
       {job?.status === "error" && job.error && (
-        <Alert type="error" message={job.error} showIcon />
+        <Alert type="error" message={humanizeApiError(job.error)} showIcon />
       )}
 
       <Tabs activeKey={tab} onChange={(k) => setTab(k as Tab)} items={tabItems} />
@@ -751,7 +752,12 @@ export function ProjectPage() {
             </Flex>
 
             {analysisError && (
-              <Alert type="error" message={analysisError} showIcon style={{ marginBottom: 16 }} />
+              <Alert
+                type="error"
+                message={humanizeApiError(analysisError)}
+                showIcon
+                style={{ marginBottom: 16 }}
+              />
             )}
 
             {!hasAnalyzed && !analysisBusy && (
@@ -825,7 +831,14 @@ export function ProjectPage() {
             )}
           </Flex>
 
-          {prdError && <Alert type="error" message={prdError} showIcon style={{ marginBottom: 16 }} />}
+          {prdError && (
+            <Alert
+              type="error"
+              message={humanizeApiError(prdError)}
+              showIcon
+              style={{ marginBottom: 16 }}
+            />
+          )}
 
           {!hasAnalyzed && (
             <Empty description="Rode a análise antes de gerar o PRD." />

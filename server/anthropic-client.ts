@@ -2,11 +2,119 @@ import Anthropic from "@anthropic-ai/sdk";
 import { ANTHROPIC_KEY_SETTING, getSetting } from "./settings";
 
 const DEFAULT_MODEL = "claude-sonnet-4-5-20250929";
+const CREDIT_PROBE_CACHE_MS = 5 * 60 * 1000;
+
+export type AnthropicErrorCode = "credits_low" | "auth" | "rate_limit" | "generic";
 
 export class AnthropicError extends Error {
-  constructor(message: string) {
+  code: AnthropicErrorCode;
+
+  constructor(message: string, code: AnthropicErrorCode = "generic") {
     super(message);
     this.name = "AnthropicError";
+    this.code = code;
+  }
+}
+
+export const CREDITS_LOW_MESSAGE =
+  "A conta está sem créditos para gerar análises com IA. Recarregue em console.anthropic.com/settings/billing ou peça ajuda ao administrador.";
+
+function extractApiErrorDetail(error: InstanceType<typeof Anthropic.APIError>): string {
+  return (
+    (error.error as { error?: { message?: string } })?.error?.message ??
+    error.message
+  );
+}
+
+function humanizeAnthropicDetail(
+  status: number,
+  detail: string
+): { message: string; code: AnthropicErrorCode } {
+  const lower = detail.toLowerCase();
+
+  if (
+    status === 400 &&
+    (lower.includes("credit balance is too low") ||
+      lower.includes("insufficient credits"))
+  ) {
+    return { message: CREDITS_LOW_MESSAGE, code: "credits_low" };
+  }
+
+  if (
+    status === 401 ||
+    lower.includes("invalid api key") ||
+    lower.includes("authentication")
+  ) {
+    return {
+      message:
+        "Chave da API Anthropic inválida ou expirada. Verifique a configuração no Admin.",
+      code: "auth",
+    };
+  }
+
+  if (status === 429 || lower.includes("rate limit") || lower.includes("rate_limit")) {
+    return {
+      message:
+        "Limite de uso da API Anthropic atingido. Aguarde alguns minutos e tente novamente.",
+      code: "rate_limit",
+    };
+  }
+
+  return {
+    message: `Erro da API Anthropic (${status}): ${detail}`,
+    code: "generic",
+  };
+}
+
+let creditProbeCache: { at: number; ok: boolean; message?: string } | null = null;
+
+/**
+ * Verifica levemente se a chave da Anthropic consegue usar a API (cache de 5 min).
+ * Não expõe saldo em dólares — a Anthropic não oferece endpoint oficial para isso.
+ */
+export async function probeAnthropicCredits(): Promise<{
+  ok: boolean;
+  message?: string;
+}> {
+  if (
+    creditProbeCache &&
+    Date.now() - creditProbeCache.at < CREDIT_PROBE_CACHE_MS
+  ) {
+    return { ok: creditProbeCache.ok, message: creditProbeCache.message };
+  }
+
+  try {
+    const client = await getClient();
+    await client.messages.countTokens({
+      model: getModel(),
+      messages: [{ role: "user", content: "ping" }],
+    });
+    creditProbeCache = { at: Date.now(), ok: true };
+    return { ok: true };
+  } catch (error) {
+    if (error instanceof Anthropic.APIError) {
+      const { message, code } = humanizeAnthropicDetail(
+        error.status,
+        extractApiErrorDetail(error)
+      );
+      if (code === "credits_low") {
+        creditProbeCache = { at: Date.now(), ok: false, message };
+        return { ok: false, message };
+      }
+    }
+
+    if (error instanceof AnthropicError) {
+      if (error.code === "credits_low") {
+        creditProbeCache = { at: Date.now(), ok: false, message: error.message };
+        return { ok: false, message: error.message };
+      }
+      if (error.message.includes("não configurada")) {
+        return { ok: true };
+      }
+    }
+
+    creditProbeCache = { at: Date.now(), ok: true };
+    return { ok: true };
   }
 }
 
@@ -64,10 +172,14 @@ async function complete({
     });
   } catch (error) {
     if (error instanceof Anthropic.APIError) {
-      const detail =
-        (error.error as { error?: { message?: string } })?.error?.message ??
-        error.message;
-      throw new AnthropicError(`Erro da API Anthropic (${error.status}): ${detail}`);
+      const { message, code } = humanizeAnthropicDetail(
+        error.status,
+        extractApiErrorDetail(error)
+      );
+      if (code === "credits_low") {
+        creditProbeCache = { at: Date.now(), ok: false, message };
+      }
+      throw new AnthropicError(message, code);
     }
     throw error;
   }

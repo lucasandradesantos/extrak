@@ -1,19 +1,54 @@
 import { LogoutOutlined } from "@ant-design/icons";
-import { Alert, Button, Flex, Layout as AntLayout, Menu, Space, Typography } from "antd";
+import { Alert, Button, Flex, Layout as AntLayout, Menu, Space, Tag, Tooltip, Typography } from "antd";
+import { useEffect, useState } from "react";
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
 import { useAnalysis } from "../analysis/AnalysisContext";
 import { useAuth } from "../auth/AuthContext";
+import { apiFetch } from "../lib/api";
+import { CREDITS_LOW_MESSAGE, isCreditsLowError } from "../lib/humanizeApiError";
 import { ExtrakLogo } from "./ExtrakLogo";
 
 const { Header, Content } = AntLayout;
 const { Text } = Typography;
 
 export function Layout() {
-  const { email, isAdmin, signOut } = useAuth();
+  const { email, isAdmin, session, signOut } = useAuth();
   const { jobs, completion, dismissCompletion } = useAnalysis();
   const location = useLocation();
+  const [aiCreditsOk, setAiCreditsOk] = useState<boolean | null>(null);
 
   const runningJobs = Object.values(jobs).filter((j) => j.status === "running");
+
+  useEffect(() => {
+    if (!session) {
+      setAiCreditsOk(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const status = await apiFetch<{ ok: boolean }>("/api/ai/status", {
+          fallback: "Erro ao verificar status da IA.",
+        });
+        if (!cancelled) setAiCreditsOk(status.ok);
+      } catch {
+        if (!cancelled) setAiCreditsOk(null);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [session]);
+
+  useEffect(() => {
+    const creditError = Object.values(jobs).some(
+      (job) => job.status === "error" && job.error && isCreditsLowError(job.error)
+    );
+    if (creditError) setAiCreditsOk(false);
+  }, [jobs]);
 
   const menuItems = [
     { key: "/", label: <NavLink to="/">Projetos</NavLink> },
@@ -53,6 +88,13 @@ export function Layout() {
         />
 
         <Space size="middle" wrap>
+          {aiCreditsOk === false && (
+            <Tooltip title={CREDITS_LOW_MESSAGE}>
+              <Tag color="error" style={{ margin: 0 }}>
+                IA sem créditos
+              </Tag>
+            </Tooltip>
+          )}
           {runningJobs.length > 0 && (
             <Text type="secondary" style={{ fontSize: 12 }}>
               {runningJobs.length} análise(s) em andamento

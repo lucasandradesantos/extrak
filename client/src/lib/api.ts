@@ -1,4 +1,5 @@
 import { supabase } from "./supabase";
+import { humanizeApiError } from "./humanizeApiError";
 
 /**
  * Lê a resposta tolerando corpos não-JSON (páginas de erro 5xx da Vercel) e
@@ -28,7 +29,7 @@ async function readApiJson<T>(response: Response, fallbackMessage: string): Prom
       );
     }
 
-    throw new Error(apiError ?? fallbackMessage);
+    throw new Error(humanizeApiError(apiError ?? fallbackMessage));
   }
 
   if (data === null) {

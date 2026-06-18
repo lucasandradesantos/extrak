@@ -10,6 +10,7 @@ import {
 } from "react";
 import { useAuth } from "../auth/AuthContext";
 import { apiFetch } from "../lib/api";
+import { humanizeApiError } from "../lib/humanizeApiError";
 import type { ProjectDetail, ProjectSummary, StepResponse } from "../types";
 
 export interface AnalysisJobState {
@@ -246,7 +247,10 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
             });
             setCompletion({ projectId: job.projectId, projectName: job.projectName });
           } else if (dbJob.status === "error") {
-            patchJob(job.projectId, { status: "error", error: dbJob.error ?? "Erro na análise." });
+            patchJob(job.projectId, {
+              status: "error",
+              error: humanizeApiError(dbJob.error ?? "Erro na análise."),
+            });
           } else {
             patchJob(job.projectId, {
               processed: dbJob.processed_chunks,
