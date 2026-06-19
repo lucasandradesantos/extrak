@@ -153,25 +153,62 @@ interface CompletionOptions {
   system: string;
   prompt: string;
   maxTokens?: number;
+  /**
+   * Orçamento de tempo (ms) para a geração. Ao atingir o limite, a geração é
+   * interrompida e a saída PARCIAL já recebida é aproveitada. Essencial em
+   * ambientes serverless com teto curto (ex.: Vercel Hobby = 60s): garante que
+   * o passo sempre conclua e grave progresso, em vez de ser morto no meio.
+   */
+  deadlineMs?: number;
 }
 
 async function complete({
   system,
   prompt,
   maxTokens = 8000,
+  deadlineMs,
 }: CompletionOptions): Promise<string> {
   const client = await getClient();
 
-  let response: Anthropic.Message;
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer =
+    deadlineMs && deadlineMs > 0
+      ? setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, deadlineMs)
+      : null;
+
+  let text = "";
   try {
-    response = await client.messages.create({
-      model: getModel(),
-      max_tokens: maxTokens,
-      system,
-      messages: [{ role: "user", content: prompt }],
-    });
+    // Streaming: mantém a conexão viva e permite abortar no deadline mantendo o
+    // que já foi gerado (o parser recupera JSON parcial).
+    const stream = client.messages.stream(
+      {
+        model: getModel(),
+        max_tokens: maxTokens,
+        system,
+        messages: [{ role: "user", content: prompt }],
+      },
+      { signal: controller.signal }
+    );
+
+    for await (const event of stream) {
+      if (
+        event.type === "content_block_delta" &&
+        event.delta.type === "text_delta"
+      ) {
+        text += event.delta.text;
+      }
+    }
   } catch (error) {
-    if (error instanceof Anthropic.APIError) {
+    if (timedOut) {
+      console.warn(
+        `[anthropic] Geração interrompida no limite de ${deadlineMs}ms; ` +
+          `usando saída parcial (${text.length} chars).`
+      );
+    } else if (error instanceof Anthropic.APIError) {
       const { message, code } = humanizeAnthropicDetail(
         error.status,
         extractApiErrorDetail(error)
@@ -180,18 +217,21 @@ async function complete({
         creditProbeCache = { at: Date.now(), ok: false, message };
       }
       throw new AnthropicError(message, code);
+    } else {
+      throw error;
     }
-    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 
-  const text = response.content
-    .filter((block): block is Anthropic.TextBlock => block.type === "text")
-    .map((block) => block.text)
-    .join("\n")
-    .trim();
+  text = text.trim();
 
   if (!text) {
-    throw new AnthropicError("A IA retornou uma resposta vazia.");
+    throw new AnthropicError(
+      timedOut
+        ? "A IA não retornou conteúdo dentro do tempo disponível."
+        : "A IA retornou uma resposta vazia."
+    );
   }
 
   return text;

@@ -20,10 +20,18 @@ export const MAX_DISCOVERY_CHARS = Math.floor(
   MAX_DISCOVERY_TOKENS * CHARS_PER_TOKEN
 );
 // Protótipo enviado na etapa de comparação (truncado por telas inteiras).
-const MAX_PROTOTYPE_CHARS = 120_000;
-// PRD e comparação recebem o Discovery COMPLETO; o teto só evita estourar a
-// janela de contexto do modelo (~200k tokens) em casos extremos.
-export const MAX_FULL_DISCOVERY_CHARS = 320_000;
+// Mantido enxuto para a etapa caber no teto serverless (Vercel Hobby = 60s):
+// quanto menor o input, mais rápido o 1º token e mais tempo sobra pra geração.
+const MAX_PROTOTYPE_CHARS = 80_000;
+// PRD e comparação recebem o Discovery (quase) COMPLETO; o teto evita estourar a
+// janela de contexto e o tempo de função em projetos grandes.
+export const MAX_FULL_DISCOVERY_CHARS = 160_000;
+
+// Orçamento de tempo por chamada de IA dentro de um passo. Fica abaixo do teto
+// de 60s da função serverless, deixando folga para leituras/gravações no banco.
+// Ao atingir o limite, aproveitamos a saída parcial e o passo conclui mesmo
+// assim (o parser recupera os gaps já gerados), evitando loop de timeout.
+const STEP_AI_DEADLINE_MS = 48_000;
 
 /** Estimativa local e barata de tokens (sem rede). Usada para dimensionar chunks. */
 export function estimateTokens(text: string): number {
@@ -142,7 +150,8 @@ export async function critiqueDiscoveryChunk(
   const raw = await completeJson<unknown>({
     system: CRITIQUE_SYSTEM,
     prompt,
-    maxTokens: 16000,
+    maxTokens: 8000,
+    deadlineMs: STEP_AI_DEADLINE_MS,
   });
 
   return normalizeGaps(raw);
@@ -182,7 +191,8 @@ export async function compareDiscoveryPrototype(
   const raw = await completeJson<unknown>({
     system: COMPARE_SYSTEM,
     prompt,
-    maxTokens: 16000,
+    maxTokens: 8000,
+    deadlineMs: STEP_AI_DEADLINE_MS,
   });
 
   return normalizeGaps(raw);
@@ -212,5 +222,10 @@ export async function generatePrd(params: PrdGenParams): Promise<string> {
     console.log(`[prd] input real ≈ ${real} tokens (estimativa ${estimateTokens(prompt)}).`);
   }
 
-  return completeText({ system: PRD_SYSTEM, prompt, maxTokens: 8000 });
+  return completeText({
+    system: PRD_SYSTEM,
+    prompt,
+    maxTokens: 8000,
+    deadlineMs: STEP_AI_DEADLINE_MS,
+  });
 }
