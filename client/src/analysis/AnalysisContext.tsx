@@ -11,7 +11,7 @@ import {
 import { useAuth } from "../auth/AuthContext";
 import { apiFetch } from "../lib/api";
 import { humanizeApiError } from "../lib/humanizeApiError";
-import type { ProjectDetail, ProjectSummary, StepResponse } from "../types";
+import type { ProjectDetail, ProjectSummary } from "../types";
 
 export interface AnalysisJobState {
   projectId: string;
@@ -48,46 +48,6 @@ interface AnalysisContextValue {
 
 const AnalysisContext = createContext<AnalysisContextValue | undefined>(undefined);
 
-/** Evita dois loops simultâneos no mesmo projeto. */
-const activeRunners = new Map<string, Promise<void>>();
-
-async function runStepsUntilDone(
-  projectId: string,
-  onProgress: (step: StepResponse) => void
-): Promise<StepResponse> {
-  let last: StepResponse = { status: "running", processed: 0, total: 1 };
-  let done = false;
-
-  while (!done) {
-    let attempt = 0;
-    const maxAttempts = 3;
-
-    while (attempt < maxAttempts) {
-      try {
-        last = await apiFetch<StepResponse>(`/api/projects/${projectId}/analyze/step`, {
-          method: "POST",
-          fallback: "Erro ao processar a análise.",
-        });
-        break;
-      } catch (err) {
-        attempt++;
-        const message = err instanceof Error ? err.message : "";
-        const retryable =
-          /fetch|network|socket|timeout|aborted|failed/i.test(message) ||
-          message.includes("Erro ao processar");
-
-        if (!retryable || attempt >= maxAttempts) throw err;
-        await new Promise((r) => setTimeout(r, 2000 * attempt));
-      }
-    }
-
-    onProgress(last);
-    if (last.status === "done") done = true;
-  }
-
-  return last;
-}
-
 export function AnalysisProvider({ children }: { children: ReactNode }) {
   const { session } = useAuth();
   const [jobs, setJobs] = useState<Record<string, AnalysisJobState>>({});
@@ -105,51 +65,39 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
     setJobs((prev) => ({ ...prev, [job.projectId]: job }));
   }, []);
 
-  const executeSteps = useCallback(
-    (projectId: string, projectName: string, initial?: { processed: number; total: number }) => {
-      if (activeRunners.has(projectId)) return activeRunners.get(projectId)!;
-
+  // Registra um job "running" no estado local para o polling acompanhar o
+  // progresso. O processamento em si roda no backend (Edge Function + cron),
+  // então NÃO depende da aba do navegador ficar aberta.
+  const trackJob = useCallback(
+    (projectId: string, projectName: string, progress?: { processed: number; total: number }) => {
       setJob({
         projectId,
         projectName,
         status: "running",
-        processed: initial?.processed ?? 0,
-        total: initial?.total ?? 1,
+        processed: progress?.processed ?? 0,
+        total: progress?.total ?? 1,
       });
-
-      const promise = (async () => {
-        try {
-          await runStepsUntilDone(projectId, (step) => {
-            setJob({
-              projectId,
-              projectName,
-              status: step.status === "done" ? "done" : "running",
-              processed: step.processed,
-              total: step.total,
-            });
-          });
-
-          setCompletion({ projectId, projectName });
-        } catch (err) {
-          const message = err instanceof Error ? err.message : "Erro na análise.";
-          patchJob(projectId, { status: "error", error: message });
-        } finally {
-          activeRunners.delete(projectId);
-        }
-      })();
-
-      activeRunners.set(projectId, promise);
-      return promise;
     },
-    [patchJob, setJob]
+    [setJob]
   );
 
   const resumeAnalysis = useCallback(
     (projectId: string, projectName: string, progress?: { processed: number; total: number }) => {
-      if (activeRunners.has(projectId)) return;
-      executeSteps(projectId, projectName, progress);
+      setJobs((prev) => {
+        if (prev[projectId]?.status === "running") return prev;
+        return {
+          ...prev,
+          [projectId]: {
+            projectId,
+            projectName,
+            status: "running",
+            processed: progress?.processed ?? 0,
+            total: progress?.total ?? 1,
+          },
+        };
+      });
     },
-    [executeSteps]
+    []
   );
 
   const startAnalysis = useCallback(
@@ -159,8 +107,6 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       reprocess: boolean,
       responses?: Record<string, string>
     ) => {
-      if (activeRunners.has(projectId)) return;
-
       if (reprocess && responses) {
         await apiFetch(`/api/projects/${projectId}/gaps`, {
           method: "PATCH",
@@ -178,15 +124,16 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
         }
       );
 
-      await executeSteps(projectId, projectName, {
+      trackJob(projectId, projectName, {
         processed: start.processed ?? 0,
         total: start.total,
       });
     },
-    [executeSteps]
+    [trackJob]
   );
 
-  // Retoma jobs em andamento ao entrar (ex.: usuário saiu da tela ou recarregou).
+  // Acompanha jobs em andamento ao entrar (ex.: usuário recarregou ou outra aba
+  // iniciou). O backend continua processando; aqui só exibimos o progresso.
   useEffect(() => {
     if (!session) return;
 

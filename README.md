@@ -11,6 +11,7 @@ Plataforma SaaS multi-time que transforma um board FigJam (Discovery) — opcion
 - Análise da IA (Claude) com **chave única no servidor**, comparando Discovery e Protótipo.
 - Persistência completa no **Supabase** (projetos, fontes extraídas, análises, gaps, PRDs).
 - Análise pesada processada **em passos** (chunks), robusta ao limite de 60s da Vercel Hobby.
+- A análise roda **no backend** (Supabase Edge Function + pg_cron): continua processando mesmo que o usuário feche a aba do navegador.
 
 ## Pré-requisitos
 
@@ -31,6 +32,9 @@ ANTHROPIC_MODEL=claude-sonnet-4-5-20250929
 SUPABASE_URL=https://SEU_PROJETO.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=sua_service_role_key   # SECRETA (Supabase Dashboard > Project Settings > API)
 ADMIN_BOOTSTRAP_SECRET=um_segredo_forte          # usado uma única vez para criar o 1º super-admin
+
+ANALYSIS_WORKER_SECRET=um_segredo_forte_para_o_worker   # mesmo valor configurado na Edge Function
+SUPABASE_FUNCTION_URL=https://SEU_PROJETO.supabase.co/functions/v1/process-analysis-step
 ```
 
 ### 2. Variáveis de ambiente do frontend (`client/.env`)
@@ -85,9 +89,47 @@ Configure no painel da Vercel (Settings → Environment Variables) **todas** as 
 
 - `FIGMA_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`
 - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `ADMIN_BOOTSTRAP_SECRET`
+- `ANALYSIS_WORKER_SECRET`, `SUPABASE_FUNCTION_URL` (URL da Edge Function: `https://SEU_PROJETO.supabase.co/functions/v1/process-analysis-step`)
 - `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY`
 
 > Limite de tempo: no plano Hobby cada função serverless tem teto de 60s. A análise roda em passos para caber nesse limite; boards muito grandes podem exigir o plano Pro (até 300s).
+
+## Worker de análise no backend
+
+A análise da IA é orquestrada **no backend**, então continua mesmo que o usuário feche a aba do navegador.
+
+Como funciona:
+
+1. `POST /api/projects/:id/analyze` cria a rodada e o job, e dispara a Edge Function `process-analysis-step` no Supabase.
+2. A Edge Function chama a rota interna `POST /api/internal/analysis/step` (autenticada pelo segredo `ANALYSIS_WORKER_SECRET`), que processa **um bloco** por vez e grava os gaps.
+3. Enquanto o job estiver `running`, a Edge Function se reinvoca, avançando bloco a bloco.
+4. O **pg_cron** roda a cada 5 minutos e recupera jobs que ficaram travados (chain interrompida, falha de rede), reprocessando a partir de onde pararam.
+5. O frontend apenas **acompanha o progresso** por polling — não dirige mais o processamento.
+
+Proteção contra processamento duplicado: cada passo é reivindicado via _compare-and-set_ em `analysis_jobs.processed_chunks` + `step_started_at` (janela de 90s).
+
+### Configuração (uma vez)
+
+1. Faça o deploy da Edge Function (já versionada em `supabase/functions/process-analysis-step/`):
+
+```bash
+supabase functions deploy process-analysis-step
+```
+
+2. Defina os secrets da Edge Function (Supabase Dashboard → Edge Functions → Secrets, ou via CLI). `SUPABASE_URL` e `SUPABASE_SERVICE_ROLE_KEY` já existem no runtime:
+
+```bash
+supabase secrets set ANALYSIS_WORKER_SECRET=<mesmo_valor_da_vercel>
+supabase secrets set VERCEL_APP_URL=https://extrak-three.vercel.app
+```
+
+3. Para o pg_cron conseguir chamar a Edge Function, guarde a `service_role` key no Vault com o nome `edge_service_role_key` (SQL Editor do Supabase):
+
+```sql
+select vault.create_secret('SUA_SERVICE_ROLE_KEY', 'edge_service_role_key');
+```
+
+O agendamento `recover-analysis-jobs` (a cada 5 min) e a coluna `analysis_jobs.step_started_at` já são criados por migrations.
 
 ## Arquitetura
 
@@ -96,7 +138,9 @@ Configure no painel da Vercel (Settings → Environment Variables) **todas** as 
   - `/api/admin/*` — bootstrap, times e usuários (Admin API + service_role).
   - `/api/projects` — CRUD de projetos por time, com extração do Figma.
   - `/api/projects/:id/analyze` + `/analyze/step` — análise em passos.
+  - `/api/internal/analysis/step` — passo da análise para o worker (auth por `ANALYSIS_WORKER_SECRET`, sem JWT).
   - `/api/projects/:id/gaps` (PATCH) e `/api/projects/:id/prd` (POST).
+- **Worker da análise:** `server/analysis-runner.ts` processa um bloco; `server/analysis-worker-client.ts` dispara a Edge Function `supabase/functions/process-analysis-step/` (com fallback local). pg_cron recupera jobs travados.
 - **Extração:** `server/parse-figjam.ts` (Discovery) e `server/parse-figma-design.ts` (telas/textos/fluxos do protótipo).
 - **IDs estáveis:** `server/gaps.ts` calcula `gap_hash = sha1(chave)`, mantendo o gap entre reprocessamentos.
 - **Prompts:** `server/prompts.ts` concentra as etapas de crítica (com comparação Discovery × Protótipo) e de PRD.

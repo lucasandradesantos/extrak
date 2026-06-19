@@ -1,11 +1,11 @@
 import { Router } from "express";
 import { pickActor, resolveActors } from "../actors";
 import { AnthropicError } from "../anthropic-client";
+import { readGaps, runAnalysisStep } from "../analysis-runner";
+import { scheduleAnalysisWorker } from "../analysis-worker-client";
 import type { AuthedRequest } from "../auth";
 import {
   chunkDiscovery,
-  compareDiscoveryPrototype,
-  critiqueDiscoveryChunk,
   generatePrd,
 } from "../analysis-service";
 import { refreshProjectSources } from "../figma-service";
@@ -13,7 +13,6 @@ import { fileKeyForGapSource, postGapReminder } from "../figma-comments";
 import { diffGaps } from "../gaps";
 import {
   type GapRow,
-  gapToRow,
   loadProjectForUser,
   mapGapRow,
 } from "../project-access";
@@ -89,6 +88,8 @@ analysisRouter.post("/:id/analyze", async (req: AuthedRequest, res) => {
       .maybeSingle();
 
     if (runningJob) {
+      // Garante que o worker está rodando (retoma um chain que pode ter morrido).
+      scheduleAnalysisWorker(project.id);
       res.status(200).json({
         analysisId: runningJob.analysis_id,
         jobId: runningJob.id,
@@ -200,6 +201,10 @@ analysisRouter.post("/:id/analyze", async (req: AuthedRequest, res) => {
     return;
   }
 
+  // Dispara o worker no backend: a análise avança bloco a bloco mesmo que o
+  // usuário feche a aba do navegador.
+  scheduleAnalysisWorker(project.id);
+
   res.status(201).json({
     analysisId: analysis.id,
     jobId: job.id,
@@ -209,7 +214,9 @@ analysisRouter.post("/:id/analyze", async (req: AuthedRequest, res) => {
   });
 });
 
-// Processa o próximo chunk da análise corrente (curto o bastante para 60s).
+// Processa o próximo chunk da análise corrente. Mantida por compatibilidade e
+// para depuração; o fluxo normal usa o worker no backend (Edge Function/cron).
+// Reagenda o worker para garantir que o restante da análise continue.
 analysisRouter.post("/:id/analyze/step", async (req: AuthedRequest, res) => {
   const project = await loadProjectForUser(req, req.params.id);
   if (!project) {
@@ -217,137 +224,27 @@ analysisRouter.post("/:id/analyze/step", async (req: AuthedRequest, res) => {
     return;
   }
 
-  const admin = getSupabaseAdmin();
-  const analysis = await getLatestAnalysis(project.id);
-  if (!analysis) {
-    res.status(400).json({ error: "Nenhuma análise iniciada." });
-    return;
-  }
+  const result = await runAnalysisStep(project.id, { force: true });
 
-  const { data: job } = await admin
-    .from("analysis_jobs")
-    .select("*")
-    .eq("analysis_id", analysis.id)
-    .maybeSingle();
-
-  if (!job) {
-    res.status(400).json({ error: "Job de análise não encontrado." });
-    return;
-  }
-
-  if (job.status === "done") {
-    const gaps = await readGaps(analysis.id);
-    res.json({ status: "done", processed: job.total_chunks, total: job.total_chunks, gaps });
-    return;
-  }
-
-  // Processa o snapshot congelado da rodada (cai para o material atual em
-  // análises antigas, anteriores ao snapshot).
-  let discovery: string = analysis.discovery_snapshot ?? "";
-  let prototype: string | null = analysis.prototype_snapshot ?? null;
-  if (!discovery) {
-    const current = await getSourceTexts(project.id);
-    discovery = current.discovery;
-    prototype = current.prototype;
-  }
-  const chunks = chunkDiscovery(discovery);
-  const hasPrototype = Boolean(prototype && prototype.trim());
-  // Último passo (quando há protótipo) é a comparação Discovery×Protótipo inteira.
-  const totalSteps = chunks.length + (hasPrototype ? 1 : 0);
-  const idx = job.processed_chunks;
-
-  // Mantém total_chunks alinhado ao plano atual de passos.
-  if (job.total_chunks !== totalSteps) {
-    await admin
-      .from("analysis_jobs")
-      .update({ total_chunks: totalSteps })
-      .eq("id", job.id);
-  }
-
-  if (idx >= totalSteps) {
-    await finishJob(job.id, analysis.id);
-    const gaps = await readGaps(analysis.id);
-    res.json({ status: "done", processed: totalSteps, total: totalSteps, gaps });
-    return;
-  }
-
-  const payload = (job.payload ?? {}) as {
-    previous_gaps?: Gap[];
-    respostas?: Record<string, string>;
-  };
-  const respostas = payload.respostas ?? {};
-  const isCompareStep = hasPrototype && idx === chunks.length;
-
-  try {
-    let gaps: Gap[];
-    if (isCompareStep) {
-      // Comparação numa única chamada com o Discovery COMPLETO + Protótipo.
-      const prevCompare = (payload.previous_gaps ?? []).filter(
-        (g) => g.source === "comparacao"
-      );
-      gaps = await compareDiscoveryPrototype({
-        discovery,
-        prototype: prototype as string,
-        previousGaps: prevCompare,
-        respostas,
-      });
-    } else {
-      // Crítica do Discovery por trecho (sem protótipo — evita falsos positivos).
-      const prevDiscovery = (payload.previous_gaps ?? []).filter(
-        (g) => g.source !== "comparacao"
-      );
-      gaps = await critiqueDiscoveryChunk({
-        discoveryChunk: chunks[idx],
-        previousGaps: prevDiscovery,
-        respostas,
-      });
-    }
-
-    if (gaps.length > 0) {
-      const rows = gaps.map((gap) => {
-        const row = gapToRow(gap, project.id, analysis.id) as Record<string, unknown>;
-        // Carrega a resposta anterior (reprocessamento) para preservar o contexto.
-        if (respostas[gap.id]?.trim()) {
-          row.resposta = respostas[gap.id].trim();
-        }
-        return row;
-      });
-      await admin.from("gaps").upsert(rows, { onConflict: "analysis_id,gap_hash" });
-    }
-
-    const processed = idx + 1;
-    const done = processed >= totalSteps;
-
-    await admin
-      .from("analysis_jobs")
-      .update({
-        processed_chunks: processed,
-        status: done ? "done" : "running",
-      })
-      .eq("id", job.id);
-
-    if (done) {
-      await admin.from("analyses").update({ status: "done" }).eq("id", analysis.id);
-      const allGaps = await readGaps(analysis.id);
-      res.json({ status: "done", processed, total: totalSteps, gaps: allGaps });
+  if (result.status === "error") {
+    if (result.error && /cr[ée]dit|api anthropic|rate limit/i.test(result.error)) {
+      res.status(502).json({ error: result.error });
       return;
     }
-
-    res.json({ status: "running", processed, total: totalSteps });
-  } catch (error) {
-    await admin
-      .from("analysis_jobs")
-      .update({ status: "error", error: error instanceof Error ? error.message : "erro" })
-      .eq("id", job.id);
-    await admin.from("analyses").update({ status: "error" }).eq("id", analysis.id);
-
-    if (error instanceof AnthropicError) {
-      res.status(502).json({ error: error.message });
-      return;
-    }
-    console.error("Erro no step de análise:", error);
-    res.status(500).json({ error: "Erro ao processar a análise." });
+    res.status(500).json({ error: result.error ?? "Erro ao processar a análise." });
+    return;
   }
+
+  if (result.status === "running") {
+    scheduleAnalysisWorker(project.id);
+  }
+
+  res.json({
+    status: result.status,
+    processed: result.processed,
+    total: result.total,
+    gaps: result.gaps,
+  });
 });
 
 // Lista as rodadas de análise do projeto (timeline do histórico).
@@ -710,22 +607,3 @@ analysisRouter.post("/:id/prd", async (req: AuthedRequest, res) => {
     res.status(500).json({ error: "Erro ao gerar o PRD." });
   }
 });
-
-async function readGaps(analysisId: string): Promise<Gap[]> {
-  const admin = getSupabaseAdmin();
-  const { data } = await admin
-    .from("gaps")
-    .select("*")
-    .eq("analysis_id", analysisId);
-  const rows = (data ?? []) as GapRow[];
-  const actors = await resolveActors(
-    rows.flatMap((row) => [row.resolved_by, row.resposta_by, row.figma_reminder_sent_by])
-  );
-  return rows.map((row) => mapGapRow(row, actors));
-}
-
-async function finishJob(jobId: string, analysisId: string): Promise<void> {
-  const admin = getSupabaseAdmin();
-  await admin.from("analysis_jobs").update({ status: "done" }).eq("id", jobId);
-  await admin.from("analyses").update({ status: "done" }).eq("id", analysisId);
-}

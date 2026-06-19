@@ -5,6 +5,7 @@ import { probeAnthropicCredits } from "./anthropic-client";
 import { type AuthedRequest, requireAuth } from "./auth";
 import { adminRouter } from "./routes/admin";
 import { analysisRouter } from "./routes/analysis";
+import { internalRouter } from "./routes/internal";
 import { projectsRouter } from "./routes/projects";
 import { isSupabaseConfigured } from "./supabase";
 
@@ -32,6 +33,9 @@ app.get("/api/ai/status", requireAuth, async (_req, res) => {
     res.json({ ok: true });
   }
 });
+
+// Worker interno da análise: autenticado por segredo compartilhado (sem JWT).
+app.use("/api/internal", internalRouter);
 
 // Admin: o /bootstrap é público; as demais rotas exigem auth (tratado no router).
 app.use("/api/admin", adminRouter);
