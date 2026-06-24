@@ -128,6 +128,15 @@ export interface AnalysisJob {
   error: string | null;
 }
 
+export interface PrdJob {
+  id: string;
+  status: "pending" | "running" | "done" | "error";
+  total_steps: number;
+  processed_steps: number;
+  current_step_label: string | null;
+  error: string | null;
+}
+
 export interface AnalysisRow {
   id: string;
   round: number;
@@ -142,6 +151,7 @@ export interface ProjectDetail {
   gaps: Gap[];
   job: AnalysisJob | null;
   prd: { id: string; version: number; content_md: string } | null;
+  prd_job: PrdJob | null;
 }
 
 export interface StepResponse {

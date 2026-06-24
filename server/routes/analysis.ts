@@ -2,7 +2,7 @@ import { Router } from "express";
 import { pickActor, resolveActors } from "../actors";
 import { AnthropicError } from "../anthropic-client";
 import { readGaps, runAnalysisStep } from "../analysis-runner";
-import { scheduleAnalysisWorker } from "../analysis-worker-client";
+import { scheduleAnalysisWorker, schedulePrdWorker } from "../analysis-worker-client";
 import type { AuthedRequest } from "../auth";
 import {
   assembleDesignSystem,
@@ -565,6 +565,139 @@ analysisRouter.post("/:id/gaps/:gapId/figma-reminder", async (req: AuthedRequest
   }
 });
 
+// Inicia geração de PRD no backend (worker). O frontend só acompanha o progresso.
+analysisRouter.post("/:id/prd/start", async (req: AuthedRequest, res) => {
+  const project = await loadProjectForUser(req, req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Projeto não encontrado." });
+    return;
+  }
+
+  const admin = getSupabaseAdmin();
+  const { discovery } = await getSourceTexts(project.id);
+
+  if (!discovery.trim()) {
+    res.status(400).json({ error: "O Discovery deste projeto está vazio." });
+    return;
+  }
+
+  const { data: runningJob } = await admin
+    .from("prd_jobs")
+    .select("*")
+    .eq("project_id", project.id)
+    .eq("status", "running")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (runningJob) {
+    schedulePrdWorker(project.id);
+    res.status(200).json({
+      jobId: runningJob.id,
+      status: "running",
+      total: runningJob.total_steps,
+      processed: runningJob.processed_steps,
+      currentStepLabel: runningJob.current_step_label,
+      resumed: true,
+    });
+    return;
+  }
+
+  const steps = planPrdSteps(discovery);
+  const draft = await loadPrdDraftSections(project.id);
+  const completedIds = completedPrdStepIds(discovery, draft);
+  const hasPartialDraft =
+    completedIds.length > 0 && completedIds.length < steps.length;
+
+  const { data: latestPrd } = await admin
+    .from("prds")
+    .select("id")
+    .eq("project_id", project.id)
+    .order("version", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  const reset = Boolean(latestPrd) && !hasPartialDraft;
+  if (reset) {
+    await clearPrdDraftSections(project.id);
+  }
+
+  const initialProcessed = reset ? 0 : completedIds.length;
+  const currentStep = steps[initialProcessed];
+
+  const { data: job, error: jobError } = await admin
+    .from("prd_jobs")
+    .insert({
+      project_id: project.id,
+      status: "running",
+      total_steps: steps.length,
+      processed_steps: initialProcessed,
+      current_step_label: currentStep?.label ?? null,
+      created_by: req.authUser?.id ?? null,
+    })
+    .select("*")
+    .single();
+
+  if (jobError || !job) {
+    res.status(500).json({ error: "Erro ao iniciar a geração do PRD." });
+    return;
+  }
+
+  schedulePrdWorker(project.id);
+
+  res.status(201).json({
+    jobId: job.id,
+    status: "running",
+    total: steps.length,
+    processed: initialProcessed,
+    currentStepLabel: currentStep?.label ?? null,
+  });
+});
+
+analysisRouter.get("/:id/prd/status", async (req: AuthedRequest, res) => {
+  const project = await loadProjectForUser(req, req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Projeto não encontrado." });
+    return;
+  }
+
+  const admin = getSupabaseAdmin();
+  const { data: job } = await admin
+    .from("prd_jobs")
+    .select("*")
+    .eq("project_id", project.id)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (!job) {
+    res.json({ status: "idle" as const });
+    return;
+  }
+
+  let prd: string | null = null;
+  if (job.status === "done") {
+    const { data: latestPrd } = await admin
+      .from("prds")
+      .select("content_md")
+      .eq("project_id", project.id)
+      .order("version", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    prd = latestPrd?.content_md ?? null;
+  }
+
+  res.json({
+    jobId: job.id,
+    status: job.status,
+    total: job.total_steps,
+    processed: job.processed_steps,
+    currentStepLabel: job.current_step_label,
+    error: job.error,
+    prd,
+  });
+});
+
 // Gera (e persiste) o PRD em múltiplos passos.
 analysisRouter.get("/:id/prd/plan", async (req: AuthedRequest, res) => {
   const project = await loadProjectForUser(req, req.params.id);
@@ -704,78 +837,12 @@ analysisRouter.post("/:id/prd/step", async (req: AuthedRequest, res) => {
   }
 });
 
-// Legado: dispara geração completa via plano + passos (cliente deve preferir /prd/step).
+// Legado: dispara geração completa via plano + passos (cliente deve preferir /prd/start).
 analysisRouter.post("/:id/prd", async (req: AuthedRequest, res) => {
-  const project = await loadProjectForUser(req, req.params.id);
-  if (!project) {
-    res.status(404).json({ error: "Projeto não encontrado." });
-    return;
-  }
-
-  const { force: _force } = req.body as { force?: boolean };
-
-  const admin = getSupabaseAdmin();
-  const analysis = await getLatestAnalysis(project.id);
-  const gaps = analysis ? await readGaps(analysis.id) : [];
-
-  const { discovery, prototype } = await getSourceTexts(project.id);
-  if (!discovery.trim()) {
-    res.status(400).json({ error: "O Discovery deste projeto está vazio." });
-    return;
-  }
-
-  const respostas: Record<string, string> = {};
-  for (const gap of gaps) {
-    if (gap.resposta?.trim()) respostas[gap.id] = gap.resposta.trim();
-  }
-
-  const params: PrdGenParams = {
-    discovery,
-    prototype,
-    gaps,
-    respostas,
-    productName: project.name,
-  };
-
-  const steps = planPrdSteps(discovery);
-  const sections: Record<string, string> = {};
-
-  try {
-    for (const step of steps) {
-      const result = await generatePrdStep(params, step.id, sections);
-      sections[result.stepId] = result.content;
-    }
-
-    const prd = assemblePrd(project.name, discovery, sections);
-
-    const { data: last } = await admin
-      .from("prds")
-      .select("version")
-      .eq("project_id", project.id)
-      .order("version", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    const { data: prdRow } = await admin
-      .from("prds")
-      .insert({
-        project_id: project.id,
-        version: (last?.version ?? 0) + 1,
-        content_md: prd,
-        created_by: req.authUser?.id,
-      })
-      .select("*")
-      .single();
-
-    res.json({ prd, prdRow });
-  } catch (error) {
-    if (error instanceof AnthropicError) {
-      res.status(502).json({ error: error.message });
-      return;
-    }
-    console.error("Erro ao gerar PRD:", error);
-    res.status(500).json({ error: "Erro ao gerar o PRD." });
-  }
+  res.status(400).json({
+    error:
+      "Use a geração no backend: POST /prd/start e acompanhe com GET /prd/status.",
+  });
 });
 
 // Lista a versão mais recente de cada documento de um grupo (spec | qa).

@@ -294,6 +294,85 @@ export function ProjectPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, id]);
 
+  useEffect(() => {
+    if (!id || !detail || loading) return;
+    if (detail.prd_job?.status === "running" && !prdLoading) {
+      setPrdLoading(true);
+      setPrdProgress({
+        current: detail.prd_job.processed_steps,
+        total: detail.prd_job.total_steps,
+        label: detail.prd_job.current_step_label ?? "Gerando…",
+      });
+    }
+  }, [id, detail, loading, prdLoading]);
+
+  useEffect(() => {
+    if (!id) return;
+    const generating = prdLoading || detail?.prd_job?.status === "running";
+    if (!generating) return;
+
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        const status = await apiFetch<{
+          status: "idle" | "running" | "done" | "error";
+          total?: number;
+          processed?: number;
+          currentStepLabel?: string | null;
+          error?: string | null;
+          prd?: string | null;
+        }>(`/api/projects/${id}/prd/status`, {
+          fallback: "Erro ao acompanhar a geração do PRD.",
+        });
+
+        if (cancelled) return;
+
+        if (status.status === "idle") return;
+
+        if (status.status === "running") {
+          setPrdProgress({
+            current: status.processed ?? 0,
+            total: status.total ?? 1,
+            label: status.currentStepLabel ?? "Gerando…",
+          });
+          return;
+        }
+
+        setPrdLoading(false);
+        setPrdProgress(null);
+
+        if (status.status === "done") {
+          setPrdError(null);
+          if (status.prd) {
+            setPrd(status.prd);
+          } else {
+            await load();
+          }
+          message.success("PRD gerado com sucesso.");
+          return;
+        }
+
+        if (status.status === "error") {
+          setPrdError(
+            humanizeApiError(status.error ?? "Erro ao gerar o PRD.") +
+              ' — clique em "Gerar novamente" para retomar de onde parou.'
+          );
+        }
+      } catch {
+        // Ignora falha pontual de polling.
+      }
+    };
+
+    void poll();
+    const interval = setInterval(poll, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, prdLoading, detail?.prd_job?.status]);
+
   const gaps = detail?.gaps ?? [];
 
   function withReminderState(gap: Gap): Gap {
@@ -339,6 +418,8 @@ export function ProjectPage() {
   const discoverySource = detail?.sources.find((s) => s.kind === "discovery");
   const prototypeSource = detail?.sources.find((s) => s.kind === "prototype");
   const hasAnalyzed = gaps.length > 0 || detail?.analysis?.status === "done";
+  const prdGenerating =
+    prdLoading || detail?.prd_job?.status === "running";
   const qaTestCasesDoc = qaDocs.find((d) => d.kind === "qa_test_cases");
   const qaIncompleteValidation = useMemo(() => {
     if (!qaTestCasesDoc?.content_md) return null;
@@ -508,87 +589,27 @@ export function ProjectPage() {
     setPrdProgress(null);
 
     try {
-      const plan = await apiFetch<{
-        steps: Array<{ id: string; label: string }>;
+      const result = await apiFetch<{
+        jobId: string;
+        status: string;
         total: number;
-        completedStepIds?: string[];
-      }>(`/api/projects/${id}/prd/plan`, {
-        fallback: "Erro ao planejar o PRD.",
+        processed: number;
+        currentStepLabel?: string | null;
+        resumed?: boolean;
+      }>(`/api/projects/${id}/prd/start`, {
+        method: "POST",
+        body: {},
+        fallback: "Erro ao iniciar a geração do PRD.",
       });
 
-      const completedCount = plan.completedStepIds?.length ?? 0;
-      const hasPartialDraft =
-        completedCount > 0 && completedCount < plan.total;
-      // Só zera rascunho ao regerar um PRD já concluído (não ao retomar após erro).
-      const reset = Boolean(prd) && !hasPartialDraft;
-
-      if (reset) {
-        await apiFetch(`/api/projects/${id}/prd/draft`, {
-          method: "DELETE",
-          fallback: "Erro ao limpar rascunho do PRD.",
-        });
-      }
-
-      const completed = new Set(reset ? [] : (plan.completedStepIds ?? []));
-      let firstPending = true;
-
-      for (const step of plan.steps) {
-        if (completed.has(step.id)) continue;
-
-        setPrdProgress({
-          current: plan.steps.indexOf(step),
-          total: plan.total,
-          label: step.label,
-        });
-
-        let lastError: Error | null = null;
-        const maxAttempts = step.id.startsWith("functional-") ? 3 : 2;
-
-        for (let attempt = 0; attempt < maxAttempts; attempt++) {
-          try {
-            const result = await apiFetch<{
-              stepId: string;
-              content: string;
-              index: number;
-              total: number;
-              done: boolean;
-              prd?: string;
-            }>(`/api/projects/${id}/prd/step`, {
-              method: "POST",
-              body: {
-                stepId: step.id,
-                reset: reset && firstPending,
-              },
-              fallback: `Erro ao gerar: ${step.label}`,
-            });
-
-            firstPending = false;
-            completed.add(step.id);
-
-            if (result.done && result.prd) {
-              setPrd(result.prd);
-            }
-            lastError = null;
-            break;
-          } catch (err) {
-            lastError = err instanceof Error ? err : new Error(String(err));
-            if (attempt < maxAttempts - 1) {
-              await new Promise((r) => setTimeout(r, 2000));
-            }
-          }
-        }
-
-        if (lastError) {
-          throw new Error(
-            `${lastError.message} — clique em "Gerar novamente" para retomar de "${step.label}".`
-          );
-        }
-      }
+      setPrdProgress({
+        current: result.processed,
+        total: result.total,
+        label: result.currentStepLabel ?? "Iniciando…",
+      });
     } catch (err) {
       setPrdError(err instanceof Error ? err.message : "Erro ao gerar o PRD.");
-    } finally {
       setPrdLoading(false);
-      setPrdProgress(null);
     }
   }
 
@@ -1215,8 +1236,8 @@ export function ProjectPage() {
             <Button
               type="primary"
               onClick={requestGeneratePrd}
-              disabled={prdLoading || !hasAnalyzed}
-              loading={prdLoading}
+              disabled={prdGenerating || !hasAnalyzed}
+              loading={prdGenerating}
             >
               {prd ? "Gerar novamente" : "Gerar PRD"}
             </Button>
@@ -1250,19 +1271,27 @@ export function ProjectPage() {
             <Empty description="Rode a análise antes de gerar o PRD." />
           )}
 
-          {prdLoading && prdProgress && (
-            <div style={{ marginBottom: 16 }}>
-              <Progress
-                percent={Math.round(((prdProgress.current + 1) / prdProgress.total) * 100)}
-                status="active"
-                strokeColor="#000"
-              />
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                Gerando PRD — {prdProgress.current + 1}/{prdProgress.total}: {prdProgress.label}
-                . Projetos grandes podem levar 15–30 min. Mantenha a aba aberta; se falhar, clique
-                em "Gerar novamente" para retomar de onde parou.
-              </Text>
-            </div>
+          {prdGenerating && prdProgress && (
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message={`Gerando PRD — ${prdProgress.current + 1}/${prdProgress.total}: ${prdProgress.label}`}
+              description={
+                <>
+                  <Progress
+                    percent={Math.round(((prdProgress.current + 1) / prdProgress.total) * 100)}
+                    status="active"
+                    strokeColor="#000"
+                    style={{ marginTop: 8 }}
+                  />
+                  <Text type="secondary" style={{ fontSize: 12, display: "block", marginTop: 8 }}>
+                    A geração roda no servidor — você pode fechar esta aba. Projetos grandes podem
+                    levar 15–30 min. Se falhar, clique em "Gerar novamente" para retomar.
+                  </Text>
+                </>
+              }
+            />
           )}
 
           {hasAnalyzed && blockingGaps.length > 0 && (
@@ -1275,7 +1304,7 @@ export function ProjectPage() {
             />
           )}
 
-          {hasAnalyzed && !prd && !prdLoading && (
+          {hasAnalyzed && !prd && !prdGenerating && (
             <Empty description='Clique em "Gerar PRD" para gerar o documento completo em passos.' />
           )}
 

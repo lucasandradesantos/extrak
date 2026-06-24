@@ -1,5 +1,6 @@
 import { Router, type Request } from "express";
 import { runAnalysisStep } from "../analysis-runner";
+import { runPrdStep } from "../prd-runner";
 
 export const internalRouter = Router();
 
@@ -36,6 +37,31 @@ internalRouter.post("/analysis/step", async (req, res) => {
     console.error("[internal/analysis/step] Erro:", error);
     res.status(500).json({
       error: error instanceof Error ? error.message : "Erro ao processar passo.",
+    });
+  }
+});
+
+/** Processa UM passo da geração de PRD (worker no backend). */
+internalRouter.post("/prd/step", async (req, res) => {
+  if (!authorizeWorker(req)) {
+    res.status(401).json({ error: "Não autorizado." });
+    return;
+  }
+
+  const { projectId, force } = req.body as { projectId?: string; force?: boolean };
+
+  if (!projectId || typeof projectId !== "string") {
+    res.status(400).json({ error: "projectId é obrigatório." });
+    return;
+  }
+
+  try {
+    const result = await runPrdStep(projectId, { force: Boolean(force) });
+    res.json(result);
+  } catch (error) {
+    console.error("[internal/prd/step] Erro:", error);
+    res.status(500).json({
+      error: error instanceof Error ? error.message : "Erro ao processar passo do PRD.",
     });
   }
 });

@@ -283,6 +283,14 @@ projectsRouter.get("/:id", async (req: AuthedRequest, res) => {
     .limit(1)
     .maybeSingle();
 
+  const { data: prdJob } = await admin
+    .from("prd_jobs")
+    .select("*")
+    .eq("project_id", project.id)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
   res.json({
     project: {
       ...project,
@@ -298,6 +306,7 @@ projectsRouter.get("/:id", async (req: AuthedRequest, res) => {
     gaps,
     job,
     prd: latestPrd ?? null,
+    prd_job: prdJob ?? null,
   });
 });
 

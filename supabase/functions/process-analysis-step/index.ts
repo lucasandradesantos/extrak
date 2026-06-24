@@ -1,11 +1,11 @@
-// Supabase Edge Function: orquestra a análise da IA no backend.
+// Supabase Edge Function: orquestra jobs pesados no backend (análise e PRD).
 //
 // Dois modos:
-//   1. { projectId }  -> processa o projeto bloco a bloco chamando a rota
-//      interna na Vercel até o job terminar. Se o tempo da função acabar,
+//   1. { projectId, jobType? }  -> processa o projeto passo a passo chamando a
+//      rota interna na Vercel até o job terminar. Se o tempo da função acabar,
 //      reinvoca a si mesma para continuar (chain).
-//   2. {} (cron)      -> recupera jobs "running" travados (sem avanço recente)
-//      e dispara uma execução por projeto.
+//   2. {} (cron)                -> recupera jobs "running" travados e dispara
+//      uma execução por projeto (análise e PRD).
 //
 // Secrets necessários (Supabase Dashboard > Edge Functions > Secrets):
 //   - ANALYSIS_WORKER_SECRET  (mesmo valor configurado na Vercel)
@@ -19,23 +19,26 @@ const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const WORKER_SECRET = Deno.env.get("ANALYSIS_WORKER_SECRET") ?? "";
 const VERCEL_APP_URL = (Deno.env.get("VERCEL_APP_URL") ?? "").replace(/\/$/, "");
 
-// Mantém folga sob o limite de execução da Edge Function antes de reencadear.
 const MAX_RUNTIME_MS = 100_000;
-// Job é considerado travado se não avançou nesse tempo.
 const STALE_MS = 2 * 60 * 1000;
 
 const SELF_URL = `${SUPABASE_URL}/functions/v1/process-analysis-step`;
+
+type JobType = "analysis" | "prd";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function callInternalStep(projectId: string): Promise<{
-  status?: string;
-  skipped?: boolean;
-  error?: string;
-}> {
-  const response = await fetch(`${VERCEL_APP_URL}/api/internal/analysis/step`, {
+function internalPath(jobType: JobType): string {
+  return jobType === "prd" ? "/api/internal/prd/step" : "/api/internal/analysis/step";
+}
+
+async function callInternalStep(
+  projectId: string,
+  jobType: JobType
+): Promise<{ status?: string; skipped?: boolean; error?: string }> {
+  const response = await fetch(`${VERCEL_APP_URL}${internalPath(jobType)}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -62,15 +65,18 @@ async function invokeSelf(body: Record<string, unknown>): Promise<void> {
   }).catch((error) => console.error("[edge] invokeSelf falhou:", error));
 }
 
-async function processProject(projectId: string, startedAt: number): Promise<void> {
+async function processProject(
+  projectId: string,
+  jobType: JobType,
+  startedAt: number
+): Promise<void> {
   while (Date.now() - startedAt < MAX_RUNTIME_MS) {
     let result: { status?: string; skipped?: boolean; error?: string };
     try {
-      result = await callInternalStep(projectId);
+      result = await callInternalStep(projectId, jobType);
     } catch (error) {
-      console.error(`[edge] erro ao chamar rota interna (${projectId}):`, error);
-      // Reencadeia para tentar de novo após uma pausa.
-      await invokeSelf({ projectId });
+      console.error(`[edge] erro ao chamar rota interna (${jobType}, ${projectId}):`, error);
+      await invokeSelf({ projectId, jobType });
       return;
     }
 
@@ -79,12 +85,11 @@ async function processProject(projectId: string, startedAt: number): Promise<voi
       continue;
     }
     if (result.status !== "running") {
-      return; // done ou error
+      return;
     }
   }
 
-  // Estourou o orçamento de tempo: continua numa nova invocação.
-  await invokeSelf({ projectId });
+  await invokeSelf({ projectId, jobType });
 }
 
 async function recoverStaleJobs(startedAt: number): Promise<number> {
@@ -93,25 +98,46 @@ async function recoverStaleJobs(startedAt: number): Promise<number> {
   });
 
   const cutoff = new Date(Date.now() - STALE_MS).toISOString();
-  const { data: jobs, error } = await admin
-    .from("analysis_jobs")
-    .select("project_id, updated_at")
-    .eq("status", "running")
-    .lt("updated_at", cutoff);
 
-  if (error) {
-    console.error("[edge] erro ao buscar jobs travados:", error);
-    return 0;
+  const [{ data: analysisJobs, error: analysisError }, { data: prdJobs, error: prdError }] =
+    await Promise.all([
+      admin
+        .from("analysis_jobs")
+        .select("project_id, updated_at")
+        .eq("status", "running")
+        .lt("updated_at", cutoff),
+      admin
+        .from("prd_jobs")
+        .select("project_id, updated_at")
+        .eq("status", "running")
+        .lt("updated_at", cutoff),
+    ]);
+
+  if (analysisError) {
+    console.error("[edge] erro ao buscar analysis jobs travados:", analysisError);
+  }
+  if (prdError) {
+    console.error("[edge] erro ao buscar prd jobs travados:", prdError);
   }
 
-  const projectIds = [...new Set((jobs ?? []).map((j) => j.project_id as string))];
-  for (const projectId of projectIds) {
-    // Cada projeto ganha sua própria invocação (orçamento de tempo isolado).
+  const invocations: Array<{ projectId: string; jobType: JobType }> = [
+    ...(analysisJobs ?? []).map((j) => ({
+      projectId: j.project_id as string,
+      jobType: "analysis" as const,
+    })),
+    ...(prdJobs ?? []).map((j) => ({
+      projectId: j.project_id as string,
+      jobType: "prd" as const,
+    })),
+  ];
+
+  for (const { projectId, jobType } of invocations) {
     if (Date.now() - startedAt < MAX_RUNTIME_MS) {
-      await invokeSelf({ projectId });
+      await invokeSelf({ projectId, jobType });
     }
   }
-  return projectIds.length;
+
+  return invocations.length;
 }
 
 Deno.serve(async (req) => {
@@ -124,7 +150,7 @@ Deno.serve(async (req) => {
     });
   }
 
-  let body: { projectId?: string } = {};
+  let body: { projectId?: string; jobType?: JobType } = {};
   try {
     body = await req.json();
   } catch {
@@ -139,11 +165,14 @@ Deno.serve(async (req) => {
     );
   }
 
+  const jobType: JobType = body.jobType === "prd" ? "prd" : "analysis";
+
   if (body.projectId) {
-    await processProject(body.projectId, startedAt);
-    return new Response(JSON.stringify({ ok: true, projectId: body.projectId }), {
-      headers: { "Content-Type": "application/json" },
-    });
+    await processProject(body.projectId, jobType, startedAt);
+    return new Response(
+      JSON.stringify({ ok: true, projectId: body.projectId, jobType }),
+      { headers: { "Content-Type": "application/json" } }
+    );
   }
 
   const recovered = await recoverStaleJobs(startedAt);

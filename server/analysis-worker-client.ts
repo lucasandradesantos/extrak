@@ -1,4 +1,7 @@
 import { runAnalysisStep } from "./analysis-runner";
+import { runPrdStep } from "./prd-runner";
+
+export type WorkerJobType = "analysis" | "prd";
 
 function workerSecret(): string | null {
   return process.env.ANALYSIS_WORKER_SECRET?.trim() || null;
@@ -20,13 +23,16 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function internalStepPath(jobType: WorkerJobType): string {
+  return jobType === "prd" ? "/api/internal/prd/step" : "/api/internal/analysis/step";
+}
+
 /**
- * Dispara o worker de análise. Em produção invoca a Edge Function do Supabase
- * (que reencadeia bloco a bloco mesmo com a aba do usuário fechada). Sem a
- * Edge Function configurada (ex.: dev local), encadeia os passos no servidor.
- * Nunca bloqueia o request que chamou — apenas inicia o processamento.
+ * Dispara o worker. Em produção invoca a Edge Function do Supabase (que reencadeia
+ * passo a passo mesmo com a aba do usuário fechada). Sem Edge Function (dev local),
+ * encadeia no servidor Node.
  */
-export function scheduleAnalysisWorker(projectId: string): void {
+export function scheduleWorker(projectId: string, jobType: WorkerJobType = "analysis"): void {
   const fnUrl = edgeFunctionUrl();
   const secret = workerSecret();
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
@@ -39,45 +45,58 @@ export function scheduleAnalysisWorker(projectId: string): void {
         Authorization: `Bearer ${serviceKey}`,
         "X-Worker-Secret": secret,
       },
-      body: JSON.stringify({ projectId }),
+      body: JSON.stringify({ projectId, jobType }),
     }).catch((error) => {
       console.error(
-        "[worker] Falha ao invocar Edge Function; usando fallback no servidor:",
+        `[worker] Falha ao invocar Edge Function (${jobType}); usando fallback no servidor:`,
         error
       );
-      void chainAnalysisOnServer(projectId);
+      void chainJobOnServer(projectId, jobType);
     });
     return;
   }
 
-  void chainAnalysisOnServer(projectId);
+  void chainJobOnServer(projectId, jobType);
+}
+
+export function scheduleAnalysisWorker(projectId: string): void {
+  scheduleWorker(projectId, "analysis");
+}
+
+export function schedulePrdWorker(projectId: string): void {
+  scheduleWorker(projectId, "prd");
+}
+
+async function callInternalStep(
+  projectId: string,
+  jobType: WorkerJobType,
+  secret: string
+): Promise<{ status?: string; skipped?: boolean }> {
+  const response = await fetch(`${internalBaseUrl()}${internalStepPath(jobType)}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Worker-Secret": secret,
+    },
+    body: JSON.stringify({ projectId }),
+  });
+  return (await response.json()) as { status?: string; skipped?: boolean };
 }
 
 /**
- * Fallback: encadeia os passos no próprio processo Node. Usado em dev local ou
- * quando a Edge Function não está configurada. Em serverless puro este loop só
- * sobrevive enquanto a função estiver viva, por isso o pg_cron é a rede de
- * segurança que retoma jobs interrompidos.
+ * Fallback: encadeia os passos no próprio processo Node.
  */
-export async function chainAnalysisOnServer(projectId: string): Promise<void> {
+export async function chainJobOnServer(
+  projectId: string,
+  jobType: WorkerJobType = "analysis"
+): Promise<void> {
   const secret = workerSecret();
   const maxSteps = 1000;
 
   for (let i = 0; i < maxSteps; i++) {
     if (secret) {
       try {
-        const response = await fetch(`${internalBaseUrl()}/api/internal/analysis/step`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Worker-Secret": secret,
-          },
-          body: JSON.stringify({ projectId }),
-        });
-        const result = (await response.json()) as {
-          status?: string;
-          skipped?: boolean;
-        };
+        const result = await callInternalStep(projectId, jobType, secret);
         if (result.skipped) {
           await sleep(1500);
           continue;
@@ -85,16 +104,24 @@ export async function chainAnalysisOnServer(projectId: string): Promise<void> {
         if (result.status !== "running") return;
         continue;
       } catch (error) {
-        console.error("[worker] Falha na rota interna; processando inline:", error);
+        console.error(`[worker] Falha na rota interna (${jobType}); processando inline:`, error);
       }
     }
 
-    // Sem secret ou falha na rota interna: processa direto no processo.
-    const result = await runAnalysisStep(projectId, { force: !secret });
+    const result =
+      jobType === "prd"
+        ? await runPrdStep(projectId, { force: !secret })
+        : await runAnalysisStep(projectId, { force: !secret });
+
     if (result.skipped) {
       await sleep(1500);
       continue;
     }
     if (result.status !== "running") return;
   }
+}
+
+/** @deprecated Use chainJobOnServer */
+export async function chainAnalysisOnServer(projectId: string): Promise<void> {
+  return chainJobOnServer(projectId, "analysis");
 }
