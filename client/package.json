@@ -12,6 +12,7 @@
     "@ant-design/icons": "^6.2.5",
     "@supabase/supabase-js": "^2.108.2",
     "antd": "^6.4.4",
+    "jszip": "^3.10.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-router-dom": "^7.17.0"

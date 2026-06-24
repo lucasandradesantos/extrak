@@ -129,6 +129,8 @@ export const PRD_SYSTEM = `Você é um Product Manager sênior escrevendo um PRD
 
 REGRA DE OURO, inegociável: onde a informação ainda não existir, escreva exatamente "[A DEFINIR — depende de X]" (substituindo X pela dependência concreta). NUNCA invente dados, métricas, prazos, personas ou regras para deixar o documento "completo". Um PRD que admite o buraco é mais seguro para o dev do que um que inventa.
 
+O PRD pode ser gerado mesmo com gaps BLOQUEADORES (severidade alta) ainda em aberto. Nesse caso, NÃO trave o documento: escreva as seções afetadas usando "[A DEFINIR — depende de X]" e registre cada bloqueador, com destaque, na seção "Pontos em aberto e bloqueios".
+
 Estruture o PRD em markdown com as seções:
 1. Visão geral e objetivo
 2. Personas e público-alvo
@@ -139,7 +141,7 @@ Estruture o PRD em markdown com as seções:
 7. Métricas de sucesso (com meta quando existir; senão [A DEFINIR — depende de X])
 8. Critérios de aceite (testáveis)
 9. Riscos e dependências
-10. Questões em aberto (liste os gaps de severidade média/baixa não resolvidos)
+10. Pontos em aberto e bloqueios: liste TODOS os gaps não resolvidos. Comece pelos BLOQUEADORES (severidade alta), cada um com o impacto no produto e o que precisa ser decidido/respondido para fechá-lo; depois os de média/baixa. Se não houver nenhum, escreva "Nenhum ponto em aberto".
 
 Use o Discovery como fonte primária, o Protótipo para os fluxos/telas e as respostas dos gaps como contexto adicional. Responda APENAS com o markdown do PRD, sem cercas de código ao redor do documento inteiro.`;
 
@@ -177,21 +179,158 @@ export function buildPrdPrompt(params: PrdParams): string {
     }
   }
 
-  const abertosNaoAltos = gaps.filter(
-    (g) => g.status !== "resolvido" && !respostas?.[g.id]?.trim()
+  parts.push("\n\nEscreva agora o PRD completo em markdown seguindo a regra de ouro.");
+
+  return parts.join("\n");
+}
+
+export type PrdSectionKind =
+  | "overview"
+  | "personas"
+  | "scope"
+  | "functional"
+  | "nonfunctional"
+  | "flows"
+  | "metrics"
+  | "acceptance"
+  | "risks";
+
+export const PRD_SECTION_SYSTEM = `Você é um Product Manager sênior escrevendo UMA SEÇÃO de um PRD (Product Requirements Document) em português.
+
+REGRA DE OURO, inegociável: onde a informação ainda não existir, escreva exatamente "[A DEFINIR — depende de X]" (substituindo X pela dependência concreta). NUNCA invente dados, métricas, prazos, personas ou regras.
+
+O PRD pode ser gerado mesmo com gaps bloqueadores em aberto. NÃO trave a seção: use [A DEFINIR] onde faltar informação. A seção "Pontos em aberto e bloqueios" será gerada separadamente — NÃO a inclua aqui.
+
+Responda APENAS com o markdown da seção solicitada, começando pelo cabeçalho ## indicado. Sem texto antes ou depois, sem cercas de código.`;
+
+const SECTION_INSTRUCTIONS: Record<PrdSectionKind, string> = {
+  overview:
+    'Escreva a seção "## 1. Visão geral e objetivo" com subseções Contexto, Objetivo do produto e Resultado esperado. Extraia do Discovery todos os objetivos de negócio, dores e metas mencionadas.',
+  personas:
+    'Escreva a seção "## 2. Personas e público-alvo". Liste TODAS as personas/perfis do Discovery (Comercial, Engenharia, Suprimentos, Almoxarifado, Qualidade, Produção, Direção, Cliente, etc.). Para cada uma use no máximo 12 linhas: idade (se existir), objetivos, atividades, ferramentas atuais e dores. Priorize cobrir TODAS as personas mencionadas em vez de detalhar poucas. Campos faltantes: [A DEFINIR — depende de X].',
+  scope:
+    'Escreva a seção "## 3. Escopo (o que entra / o que não entra)". Liste TODOS os módulos, fases e funcionalidades do Discovery em "O que entra" e "O que não entra". Seja exaustivo — um módulo por item numerado.',
+  functional:
+    'Escreva requisitos funcionais numerados (RF-001, RF-002, …) para o trecho do Discovery fornecido. Gere no máximo 12 RFs neste passo, com até 5 linhas cada (ID, módulo, descrição, regras, critérios). Se houver hint de continuação de numeração, obedeça-o. Use [A DEFINIR] onde faltar detalhe. Se for o primeiro chunk, comece com "## 4. Requisitos funcionais".',
+  nonfunctional:
+    'Escreva a seção "## 5. Requisitos não-funcionais" cobrindo performance, segurança, usabilidade, disponibilidade, integrações, compatibilidade e conformidade mencionadas no Discovery.',
+  flows:
+    'Escreva a seção "## 6. Fluxos e telas". Mapeie telas, navegação e fluxos do Protótipo (quando houver) e do Discovery. Descreva cada fluxo principal passo a passo.',
+  metrics:
+    'Escreva a seção "## 7. Métricas de sucesso" com KPIs, baselines e metas do Discovery. Onde não houver meta, use [A DEFINIR — depende de X].',
+  acceptance:
+    'Escreva a seção "## 8. Critérios de aceite" com critérios testáveis por módulo/funcionalidade principal. Critérios vagos do Discovery devem ser reformulados como testáveis ou marcados [A DEFINIR].',
+  risks:
+    'Escreva a seção "## 9. Riscos e dependências" com riscos técnicos, de negócio, integrações, dependências externas e premissas do Discovery.',
+};
+
+export interface PrdSectionPromptParams {
+  kind: PrdSectionKind;
+  discovery: string;
+  prototype?: string | null;
+  gaps: Gap[];
+  respostas?: Record<string, string>;
+  productName?: string;
+  functionalIndex?: number | null;
+  functionalTotal?: number;
+  previousFunctional?: string | null;
+  previousSections?: Record<string, string>;
+}
+
+function gapSummary(gaps: Gap[], respostas: Record<string, string>): string {
+  const abertos = gaps.filter(
+    (g) => g.status !== "resolvido" && !respostas[g.id]?.trim()
   );
-  if (abertosNaoAltos.length > 0) {
+  if (abertos.length === 0) return "Nenhum gap em aberto.";
+
+  const alta = abertos.filter((g) => g.severidade === "alta").length;
+  const media = abertos.filter((g) => g.severidade === "media").length;
+  const baixa = abertos.filter((g) => g.severidade === "baixa").length;
+
+  return (
+    `${abertos.length} gap(s) em aberto (${alta} bloqueador(es), ${media} média, ${baixa} baixa). ` +
+    "Use [A DEFINIR — depende de X] nas lacunas. Não liste os gaps aqui — a seção 10 será gerada separadamente."
+  );
+}
+
+export function buildPrdSectionPrompt(params: PrdSectionPromptParams): string {
+  const {
+    kind,
+    discovery,
+    prototype,
+    gaps,
+    respostas = {},
+    productName,
+    functionalIndex,
+    functionalTotal,
+    previousFunctional,
+    previousSections = {},
+  } = params;
+
+  const parts: string[] = [];
+
+  if (productName) {
+    parts.push(`# Produto: ${productName}\n`);
+  }
+
+  parts.push(`# Instrução\n${SECTION_INSTRUCTIONS[kind]}\n`);
+
+  if (kind === "functional" && functionalIndex != null && functionalTotal != null) {
     parts.push(
-      "\n\n# Gaps ainda em aberto (use [A DEFINIR — depende de ...] nas seções afetadas)\n"
+      `\nEste é o trecho **${functionalIndex + 1} de ${functionalTotal}** dos requisitos funcionais. ` +
+        "Foque APENAS no Discovery abaixo para este trecho.\n"
     );
-    for (const gap of abertosNaoAltos) {
+    if (functionalIndex === 0) {
       parts.push(
-        `\n- [${gap.severidade}] [${gap.localizacao}] ${gap.titulo}: ${gap.descricao}`
+        "Comece a seção com o cabeçalho ## 4. Requisitos funcionais e em seguida liste os RFs deste trecho.\n"
       );
+    } else {
+      parts.push(
+        "NÃO repita o cabeçalho ## 4. Apenas continue a lista de requisitos funcionais numerados.\n"
+      );
+    }
+    if (previousFunctional) {
+      parts.push("\n# Continuação da numeração\n");
+      parts.push(previousFunctional);
     }
   }
 
-  parts.push("\n\nEscreva agora o PRD completo em markdown seguindo a regra de ouro.");
+  parts.push("\n# Discovery estruturado\n");
+  parts.push(discovery);
+
+  if (kind === "flows" && prototype?.trim()) {
+    parts.push("\n\n# Protótipo estruturado\n");
+    parts.push(prototype);
+  }
+
+  const respondidos = gaps.filter((g) => respostas[g.id]?.trim());
+  if (respondidos.length > 0) {
+    parts.push("\n\n# Respostas aos gaps (contexto adicional)\n");
+    for (const gap of respondidos.slice(0, 40)) {
+      parts.push(
+        `\n- [${gap.localizacao}] ${gap.titulo}: ${respostas[gap.id].trim()}`
+      );
+    }
+    if (respondidos.length > 40) {
+      parts.push(`\n... e mais ${respondidos.length - 40} resposta(s).`);
+    }
+  }
+
+  parts.push(`\n\n# Gaps em aberto (resumo)\n${gapSummary(gaps, respostas)}`);
+
+  const contextKeys = ["overview", "scope"] as const;
+  const contextParts = contextKeys
+    .map((key) => previousSections[key])
+    .filter(Boolean);
+  if (contextParts.length > 0 && kind !== "overview") {
+    parts.push("\n\n# Seções já escritas (mantenha consistência)\n");
+    for (const section of contextParts) {
+      parts.push(section!.slice(0, 3_000));
+      parts.push("\n---\n");
+    }
+  }
+
+  parts.push("\n\nEscreva agora APENAS a seção solicitada.");
 
   return parts.join("\n");
 }

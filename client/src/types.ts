@@ -142,6 +142,26 @@ export interface StepResponse {
   gaps?: Gap[];
 }
 
+export type SpecDocKind =
+  | "requirements"
+  | "architecture"
+  | "data_model"
+  | "design_system"
+  | "implementation_plan"
+  | "business_model"
+  | "agents"
+  | "open_questions"
+  | "qa_test_cases";
+
+export interface SpecDoc {
+  kind: SpecDocKind;
+  label: string;
+  filename: string;
+  content_md: string | null;
+  version: number;
+  updated_at: string | null;
+}
+
 export interface AnalysisSourceMetadata {
   discovery?: SourceMetadata | null;
   prototype?: SourceMetadata | null;

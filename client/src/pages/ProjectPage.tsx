@@ -23,6 +23,7 @@ import { GapCard } from "../components/GapCard";
 import { ProjectFormModal, type ProjectFormValues } from "../components/ProjectFormModal";
 import { SourceViewPanel } from "../components/SourceViewPanel";
 import { apiFetch } from "../lib/api";
+import { downloadDocsAsZip, downloadText, sanitizeFilename } from "../lib/download";
 import { humanizeApiError } from "../lib/humanizeApiError";
 import { formatActor } from "../lib/actors";
 import {
@@ -39,11 +40,19 @@ import type {
   GapStatus,
   ProjectDetail,
   ProjectSource,
+  SpecDoc,
 } from "../types";
 
 const { Title, Text, Paragraph } = Typography;
 
-type Tab = "discovery" | "prototype" | "analise" | "prd" | "historico";
+type Tab =
+  | "discovery"
+  | "prototype"
+  | "analise"
+  | "prd"
+  | "specs"
+  | "qa"
+  | "historico";
 
 function formatDateTime(iso: string): string {
   return new Date(iso).toLocaleString("pt-BR", {
@@ -63,16 +72,6 @@ function figmaVersion(item: {
 
 async function copy(text: string): Promise<void> {
   await navigator.clipboard.writeText(text);
-}
-
-function downloadText(text: string, filename: string): void {
-  const blob = new Blob([text], { type: "text/markdown" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
 }
 
 function sevTagColor(sev: GapSeveridade): "error" | "warning" | "default" {
@@ -135,6 +134,26 @@ export function ProjectPage() {
   const [prd, setPrd] = useState<string | null>(null);
   const [prdLoading, setPrdLoading] = useState(false);
   const [prdError, setPrdError] = useState<string | null>(null);
+  const [prdProgress, setPrdProgress] = useState<{
+    current: number;
+    total: number;
+    label: string;
+  } | null>(null);
+
+  const [docs, setDocs] = useState<SpecDoc[]>([]);
+  const [docsLoading, setDocsLoading] = useState(false);
+  const [docsError, setDocsError] = useState<string | null>(null);
+  const [docBusyKind, setDocBusyKind] = useState<string | null>(null);
+  const [dsProgress, setDsProgress] = useState<{
+    current: number;
+    total: number;
+    label: string;
+  } | null>(null);
+  const [packBusy, setPackBusy] = useState(false);
+
+  const [qaDocs, setQaDocs] = useState<SpecDoc[]>([]);
+  const [qaDocsLoading, setQaDocsLoading] = useState(false);
+  const [qaDocsError, setQaDocsError] = useState<string | null>(null);
 
   const [history, setHistory] = useState<AnalysisHistoryItem[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -244,6 +263,12 @@ export function ProjectPage() {
     if (tab === "historico") loadHistory();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab, id, completion]);
+
+  useEffect(() => {
+    if (tab === "specs") loadDocs("spec");
+    if (tab === "qa") loadDocs("qa");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, id]);
 
   const gaps = detail?.gaps ?? [];
 
@@ -445,19 +470,238 @@ export function ProjectPage() {
   }
 
   async function handleGeneratePrd() {
+    if (!id) return;
     setPrdLoading(true);
     setPrdError(null);
+    setPrdProgress(null);
+
     try {
-      const data = await apiFetch<{ prd: string }>(`/api/projects/${id}/prd`, {
-        method: "POST",
-        fallback: "Erro ao gerar o PRD.",
+      const plan = await apiFetch<{
+        steps: Array<{ id: string; label: string }>;
+        total: number;
+        completedStepIds?: string[];
+      }>(`/api/projects/${id}/prd/plan`, {
+        fallback: "Erro ao planejar o PRD.",
       });
-      setPrd(data.prd);
+
+      const completedCount = plan.completedStepIds?.length ?? 0;
+      const hasPartialDraft =
+        completedCount > 0 && completedCount < plan.total;
+      // Só zera rascunho ao regerar um PRD já concluído (não ao retomar após erro).
+      const reset = Boolean(prd) && !hasPartialDraft;
+
+      if (reset) {
+        await apiFetch(`/api/projects/${id}/prd/draft`, {
+          method: "DELETE",
+          fallback: "Erro ao limpar rascunho do PRD.",
+        });
+      }
+
+      const completed = new Set(reset ? [] : (plan.completedStepIds ?? []));
+      let firstPending = true;
+
+      for (const step of plan.steps) {
+        if (completed.has(step.id)) continue;
+
+        setPrdProgress({
+          current: plan.steps.indexOf(step),
+          total: plan.total,
+          label: step.label,
+        });
+
+        let lastError: Error | null = null;
+        const maxAttempts = step.id.startsWith("functional-") ? 3 : 2;
+
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+          try {
+            const result = await apiFetch<{
+              stepId: string;
+              content: string;
+              index: number;
+              total: number;
+              done: boolean;
+              prd?: string;
+            }>(`/api/projects/${id}/prd/step`, {
+              method: "POST",
+              body: {
+                stepId: step.id,
+                reset: reset && firstPending,
+              },
+              fallback: `Erro ao gerar: ${step.label}`,
+            });
+
+            firstPending = false;
+            completed.add(step.id);
+
+            if (result.done && result.prd) {
+              setPrd(result.prd);
+            }
+            lastError = null;
+            break;
+          } catch (err) {
+            lastError = err instanceof Error ? err : new Error(String(err));
+            if (attempt < maxAttempts - 1) {
+              await new Promise((r) => setTimeout(r, 2000));
+            }
+          }
+        }
+
+        if (lastError) {
+          throw new Error(
+            `${lastError.message} — clique em "Gerar novamente" para retomar de "${step.label}".`
+          );
+        }
+      }
     } catch (err) {
       setPrdError(err instanceof Error ? err.message : "Erro ao gerar o PRD.");
     } finally {
       setPrdLoading(false);
+      setPrdProgress(null);
     }
+  }
+
+  function requestGeneratePrd() {
+    handleGeneratePrd();
+  }
+
+  async function loadDocs(group: "spec" | "qa") {
+    if (!id) return;
+    const isQa = group === "qa";
+    const setItems = isQa ? setQaDocs : setDocs;
+    const setLoad = isQa ? setQaDocsLoading : setDocsLoading;
+    const setErr = isQa ? setQaDocsError : setDocsError;
+    setLoad(true);
+    setErr(null);
+    try {
+      const data = await apiFetch<{ docs: SpecDoc[] }>(
+        `/api/projects/${id}/docs?group=${group}`,
+        { fallback: "Erro ao carregar os documentos." }
+      );
+      setItems(data.docs);
+    } catch (err) {
+      setErr(err instanceof Error ? err.message : "Erro ao carregar os documentos.");
+    } finally {
+      setLoad(false);
+    }
+  }
+
+  async function generateDesignSystemDoc(): Promise<boolean> {
+    if (!id) return false;
+    setDocBusyKind("design_system");
+    setDocsError(null);
+    setDsProgress(null);
+
+    try {
+      const plan = await apiFetch<{
+        steps: Array<{ id: string; label: string }>;
+        total: number;
+      }>(`/api/projects/${id}/docs/design_system/plan`, {
+        fallback: "Erro ao planejar o Design System.",
+      });
+
+      const sections: Record<string, string> = {};
+
+      for (const step of plan.steps) {
+        setDsProgress({
+          current: plan.steps.indexOf(step),
+          total: plan.total,
+          label: step.label,
+        });
+
+        let lastError: Error | null = null;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const result = await apiFetch<{
+              stepId: string;
+              content: string;
+              index: number;
+              total: number;
+              done: boolean;
+              doc?: SpecDoc;
+            }>(`/api/projects/${id}/docs/design_system/step`, {
+              method: "POST",
+              body: { stepId: step.id, sections },
+              fallback: `Erro ao gerar: ${step.label}`,
+            });
+
+            sections[result.stepId] = result.content;
+            if (result.done && result.doc) {
+              setDocs((prev) =>
+                prev.map((d) => (d.kind === "design_system" ? result.doc! : d))
+              );
+            }
+            lastError = null;
+            break;
+          } catch (err) {
+            lastError = err instanceof Error ? err : new Error(String(err));
+            if (attempt === 0) {
+              await new Promise((r) => setTimeout(r, 1500));
+            }
+          }
+        }
+
+        if (lastError) {
+          throw lastError;
+        }
+      }
+
+      return true;
+    } catch (err) {
+      setDocsError(
+        err instanceof Error ? err.message : "Erro ao gerar o Design System."
+      );
+      return false;
+    } finally {
+      setDocBusyKind(null);
+      setDsProgress(null);
+    }
+  }
+
+  async function generateDoc(kind: string, group: "spec" | "qa"): Promise<boolean> {
+    if (!id) return false;
+    if (kind === "design_system" && group === "spec") {
+      return generateDesignSystemDoc();
+    }
+    const isQa = group === "qa";
+    const setItems = isQa ? setQaDocs : setDocs;
+    const setErr = isQa ? setQaDocsError : setDocsError;
+    setDocBusyKind(kind);
+    setErr(null);
+    try {
+      const doc = await apiFetch<SpecDoc>(`/api/projects/${id}/docs/${kind}`, {
+        method: "POST",
+        fallback: "Erro ao gerar o documento.",
+      });
+      setItems((prev) => prev.map((d) => (d.kind === kind ? doc : d)));
+      return true;
+    } catch (err) {
+      setErr(err instanceof Error ? err.message : "Erro ao gerar o documento.");
+      return false;
+    } finally {
+      setDocBusyKind(null);
+    }
+  }
+
+  async function generatePack() {
+    if (!id || docs.length === 0) return;
+    setPackBusy(true);
+    setDocsError(null);
+    try {
+      for (const doc of docs) {
+        const ok = await generateDoc(doc.kind, "spec");
+        if (!ok) break;
+      }
+    } finally {
+      setPackBusy(false);
+    }
+  }
+
+  async function downloadAllDocs(items: SpecDoc[]) {
+    if (!detail) return;
+    const files = items
+      .filter((doc) => doc.content_md)
+      .map((doc) => ({ filename: doc.filename, content: doc.content_md! }));
+    await downloadDocsAsZip(files, detail.project.name);
   }
 
   async function handleCopy(text: string, label: string) {
@@ -591,6 +835,8 @@ export function ProjectPage() {
       label: `Análise (IA)${gaps.length > 0 ? ` · ${gaps.length}` : ""}`,
     },
     { key: "prd", label: "PRD" },
+    { key: "specs", label: "Specs" },
+    { key: "qa", label: "QA" },
     { key: "historico", label: "Histórico" },
   ];
 
@@ -808,8 +1054,8 @@ export function ProjectPage() {
           <Flex wrap="wrap" gap={8} style={{ marginBottom: 16 }}>
             <Button
               type="primary"
-              onClick={handleGeneratePrd}
-              disabled={prdLoading || !hasAnalyzed || blockingGaps.length > 0}
+              onClick={requestGeneratePrd}
+              disabled={prdLoading || !hasAnalyzed}
               loading={prdLoading}
             >
               {prd ? "Gerar novamente" : "Gerar PRD"}
@@ -821,7 +1067,7 @@ export function ProjectPage() {
                   onClick={() =>
                     downloadText(
                       prd,
-                      `PRD_${detail.project.name.replace(/[^a-z0-9-_]+/gi, "_")}.md`
+                      `PRD_${sanitizeFilename(detail.project.name)}.md`
                     )
                   }
                 >
@@ -844,20 +1090,247 @@ export function ProjectPage() {
             <Empty description="Rode a análise antes de gerar o PRD." />
           )}
 
+          {prdLoading && prdProgress && (
+            <div style={{ marginBottom: 16 }}>
+              <Progress
+                percent={Math.round(((prdProgress.current + 1) / prdProgress.total) * 100)}
+                status="active"
+                strokeColor="#000"
+              />
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                Gerando PRD — {prdProgress.current + 1}/{prdProgress.total}: {prdProgress.label}
+                . Projetos grandes podem levar 15–30 min. Mantenha a aba aberta; se falhar, clique
+                em "Gerar novamente" para retomar de onde parou.
+              </Text>
+            </div>
+          )}
+
           {hasAnalyzed && blockingGaps.length > 0 && (
             <Alert
               type="warning"
               showIcon
               style={{ marginBottom: 16 }}
-              message={`${blockingGaps.length} gap(s) de severidade alta ainda em aberto. Responda-os e reprocesse para liberar a geração do PRD.`}
+              message={`${blockingGaps.length} gap(s) de severidade alta ainda em aberto`}
+              description='O PRD será gerado completo mesmo assim: lacunas viram [A DEFINIR] nas seções afetadas e todos os gaps são listados na seção 10. Resolvê-los antes melhora a qualidade.'
             />
           )}
 
-          {hasAnalyzed && blockingGaps.length === 0 && !prd && (
-            <Empty description='Tudo liberado. Clique em "Gerar PRD".' />
+          {hasAnalyzed && !prd && !prdLoading && (
+            <Empty description='Clique em "Gerar PRD" para gerar o documento completo em passos.' />
           )}
 
           {prd && <pre className="prd-pre">{prd}</pre>}
+        </Card>
+      )}
+
+      {tab === "specs" && (
+        <Card>
+          <Paragraph type="secondary" style={{ marginTop: 0 }}>
+            Pacote de documentos para desenvolver o produto numa IDE com IA. Cada
+            documento é gerado a partir do Discovery, do Protótipo e dos gaps.
+          </Paragraph>
+
+          <Flex wrap="wrap" gap={8} style={{ marginBottom: 16 }}>
+            <Button
+              type="primary"
+              onClick={generatePack}
+              disabled={!hasAnalyzed || packBusy || Boolean(docBusyKind)}
+              loading={packBusy}
+            >
+              Gerar pacote completo
+            </Button>
+            {docs.some((d) => d.content_md) && (
+              <Button onClick={() => downloadAllDocs(docs)} disabled={packBusy}>
+                Baixar pacote (.zip)
+              </Button>
+            )}
+          </Flex>
+
+          {!hasAnalyzed && (
+            <Empty description="Rode a análise antes de gerar os documentos." />
+          )}
+
+          {docsError && (
+            <Alert
+              type="error"
+              message={humanizeApiError(docsError)}
+              showIcon
+              style={{ marginBottom: 16 }}
+            />
+          )}
+
+          {dsProgress && (
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message={`Gerando Design System — ${dsProgress.current + 1}/${dsProgress.total}: ${dsProgress.label}`}
+              description="Mantenha esta aba aberta até concluir. O primeiro passo inclui tokens extraídos do Figma (cores hex, tipografia)."
+            />
+          )}
+
+          {hasAnalyzed && (
+            <Spin spinning={docsLoading}>
+              <Collapse
+                items={docs.map((doc) => ({
+                  key: doc.kind,
+                  label: (
+                    <Flex justify="space-between" align="center" gap={8} wrap="wrap">
+                      <span>
+                        {doc.label}{" "}
+                        {doc.version > 0 ? (
+                          <Tag color="green">v{doc.version}</Tag>
+                        ) : (
+                          <Tag>não gerado</Tag>
+                        )}
+                      </span>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        {doc.filename}
+                      </Text>
+                    </Flex>
+                  ),
+                  children: (
+                    <>
+                      <Flex wrap="wrap" gap={8} style={{ marginBottom: 12 }}>
+                        <Button
+                          type="primary"
+                          size="small"
+                          onClick={() => generateDoc(doc.kind, "spec")}
+                          loading={docBusyKind === doc.kind}
+                          disabled={
+                            packBusy ||
+                            (Boolean(docBusyKind) && docBusyKind !== doc.kind)
+                          }
+                        >
+                          {doc.content_md ? "Gerar novamente" : "Gerar"}
+                        </Button>
+                        {doc.content_md && (
+                          <>
+                            <Button
+                              size="small"
+                              onClick={() =>
+                                handleCopy(doc.content_md!, `${doc.label} copiado`)
+                              }
+                            >
+                              Copiar
+                            </Button>
+                            <Button
+                              size="small"
+                              onClick={() => downloadText(doc.content_md!, doc.filename)}
+                            >
+                              Baixar .md
+                            </Button>
+                          </>
+                        )}
+                      </Flex>
+                      {doc.content_md ? (
+                        <pre className="prd-pre">{doc.content_md}</pre>
+                      ) : (
+                        <Empty description="Documento ainda não gerado." />
+                      )}
+                    </>
+                  ),
+                }))}
+              />
+            </Spin>
+          )}
+        </Card>
+      )}
+
+      {tab === "qa" && (
+        <Card>
+          <Paragraph type="secondary" style={{ marginTop: 0 }}>
+            Ambiente do QA. Gera Casos de Teste funcionais (manuais, caixa-preta)
+            a partir do Discovery, do Protótipo e dos gaps, no padrão do time —
+            pronto para enviar ao cliente.
+          </Paragraph>
+
+          <Flex wrap="wrap" gap={8} style={{ marginBottom: 16 }}>
+            {qaDocs.some((d) => d.content_md) && (
+              <Button onClick={() => downloadAllDocs(qaDocs)}>
+                Baixar pacote (.zip)
+              </Button>
+            )}
+          </Flex>
+
+          {!hasAnalyzed && (
+            <Empty description="Rode a análise antes de gerar os casos de teste." />
+          )}
+
+          {qaDocsError && (
+            <Alert
+              type="error"
+              message={humanizeApiError(qaDocsError)}
+              showIcon
+              style={{ marginBottom: 16 }}
+            />
+          )}
+
+          {hasAnalyzed && (
+            <Spin spinning={qaDocsLoading}>
+              <Collapse
+                defaultActiveKey={qaDocs.map((d) => d.kind)}
+                items={qaDocs.map((doc) => ({
+                  key: doc.kind,
+                  label: (
+                    <Flex justify="space-between" align="center" gap={8} wrap="wrap">
+                      <span>
+                        {doc.label}{" "}
+                        {doc.version > 0 ? (
+                          <Tag color="green">v{doc.version}</Tag>
+                        ) : (
+                          <Tag>não gerado</Tag>
+                        )}
+                      </span>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        {doc.filename}
+                      </Text>
+                    </Flex>
+                  ),
+                  children: (
+                    <>
+                      <Flex wrap="wrap" gap={8} style={{ marginBottom: 12 }}>
+                        <Button
+                          type="primary"
+                          size="small"
+                          onClick={() => generateDoc(doc.kind, "qa")}
+                          loading={docBusyKind === doc.kind}
+                          disabled={
+                            Boolean(docBusyKind) && docBusyKind !== doc.kind
+                          }
+                        >
+                          {doc.content_md ? "Gerar novamente" : "Gerar"}
+                        </Button>
+                        {doc.content_md && (
+                          <>
+                            <Button
+                              size="small"
+                              onClick={() =>
+                                handleCopy(doc.content_md!, `${doc.label} copiado`)
+                              }
+                            >
+                              Copiar
+                            </Button>
+                            <Button
+                              size="small"
+                              onClick={() => downloadText(doc.content_md!, doc.filename)}
+                            >
+                              Baixar .md
+                            </Button>
+                          </>
+                        )}
+                      </Flex>
+                      {doc.content_md ? (
+                        <pre className="prd-pre">{doc.content_md}</pre>
+                      ) : (
+                        <Empty description="Casos de teste ainda não gerados." />
+                      )}
+                    </>
+                  ),
+                }))}
+              />
+            </Spin>
+          )}
         </Card>
       )}
 

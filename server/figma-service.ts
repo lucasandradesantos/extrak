@@ -1,7 +1,18 @@
-import { fetchFigmaComments, fetchFigmaFile } from "./figma-client";
+import {
+  fetchFigmaComments,
+  fetchFigmaFile,
+  fetchFigmaNodes,
+  fetchFigmaVariablesLocal,
+} from "./figma-client";
 import { buildDiscoveryText, parseFigJamDocument } from "./parse-figjam";
 import { formatDesignAsText, parseFigmaDesign } from "./parse-figma-design";
+import {
+  buildParsedDesignTokens,
+  formatDesignTokensAsText,
+} from "./parse-figma-tokens";
+import type { FigmaVariablesLocal } from "./parse-figma-tokens";
 import { getSupabaseAdmin } from "./supabase";
+import type { DesignSummary } from "./types";
 
 export type SourceKind = "discovery" | "prototype";
 
@@ -10,7 +21,7 @@ export interface SourceMetadata {
   lastModified: string;
   editorType: string;
   version: string;
-  summary: Record<string, number>;
+  summary: Record<string, number | DesignSummary["designTokens"]>;
 }
 
 export interface ExtractedSource {
@@ -63,9 +74,24 @@ export async function extractDiscovery(fileKey: string): Promise<ExtractedSource
 export async function extractPrototype(fileKey: string): Promise<ExtractedSource> {
   const token = getFigmaToken();
 
-  const file = await fetchFigmaFile(fileKey, token);
+  const [file, variablesRaw] = await Promise.all([
+    fetchFigmaFile(fileKey, token),
+    fetchFigmaVariablesLocal(fileKey, token),
+  ]);
+
+  const styleIds = Object.keys(file.styles ?? {});
+  const styleNodes = await fetchFigmaNodes(fileKey, styleIds, token);
+
+  const designTokens = buildParsedDesignTokens(
+    file,
+    styleNodes,
+    variablesRaw as FigmaVariablesLocal | null
+  );
+
   const parsed = parseFigmaDesign(file.document);
-  const text = formatDesignAsText(file.document, parsed);
+  const wireframesText = formatDesignAsText(file.document, parsed);
+  const tokensText = formatDesignTokensAsText(designTokens);
+  const text = `${wireframesText}\n\n---\n\n${tokensText}`;
 
   return {
     kind: "prototype",
@@ -75,7 +101,17 @@ export async function extractPrototype(fileKey: string): Promise<ExtractedSource
       lastModified: file.lastModified,
       editorType: file.editorType,
       version: file.version,
-      summary: parsed.summary as unknown as Record<string, number>,
+      summary: {
+        ...parsed.summary,
+        designTokens: {
+          colors: designTokens.colors.length,
+          typography: designTokens.typography.length,
+          effects: designTokens.effects.length,
+          variables: designTokens.variables.length,
+          components: designTokens.components.length,
+          designSystemFrames: designTokens.designSystemFrames.length,
+        },
+      },
     },
     text,
   };

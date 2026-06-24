@@ -5,9 +5,31 @@ import { readGaps, runAnalysisStep } from "../analysis-runner";
 import { scheduleAnalysisWorker } from "../analysis-worker-client";
 import type { AuthedRequest } from "../auth";
 import {
+  assembleDesignSystem,
+  generateDesignSystemStep,
+  planDesignSystemSteps,
+  type DesignSystemGenParams,
+} from "../design-system-service";
+import {
   chunkDiscovery,
-  generatePrd,
+  generateSpecDoc,
 } from "../analysis-service";
+import {
+  assemblePrd,
+  clearPrdDraftSections,
+  completedPrdStepIds,
+  generatePrdStep,
+  loadPrdDraftSections,
+  planPrdSteps,
+  savePrdDraftSections,
+  type PrdGenParams,
+} from "../prd-service";
+import {
+  SPEC_DOCS,
+  type SpecDocGroup,
+  type SpecDocKind,
+  docOrderForGroup,
+} from "../spec-docs";
 import { refreshProjectSources } from "../figma-service";
 import { fileKeyForGapSource, postGapReminder } from "../figma-comments";
 import { diffGaps } from "../gaps";
@@ -536,7 +558,146 @@ analysisRouter.post("/:id/gaps/:gapId/figma-reminder", async (req: AuthedRequest
   }
 });
 
-// Gera (e persiste) o PRD. Bloqueia se houver gap de severidade alta em aberto.
+// Gera (e persiste) o PRD em múltiplos passos.
+analysisRouter.get("/:id/prd/plan", async (req: AuthedRequest, res) => {
+  const project = await loadProjectForUser(req, req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Projeto não encontrado." });
+    return;
+  }
+
+  const { discovery } = await getSourceTexts(project.id);
+  if (!discovery.trim()) {
+    res.status(400).json({ error: "O Discovery deste projeto está vazio." });
+    return;
+  }
+
+  const steps = planPrdSteps(discovery);
+  const draft = await loadPrdDraftSections(project.id);
+  const completedStepIds = completedPrdStepIds(discovery, draft);
+
+  res.json({
+    steps: steps.map((s) => ({
+      id: s.id,
+      label: s.label,
+      deterministic: Boolean(s.deterministic),
+    })),
+    total: steps.length,
+    completedStepIds,
+  });
+});
+
+analysisRouter.delete("/:id/prd/draft", async (req: AuthedRequest, res) => {
+  const project = await loadProjectForUser(req, req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Projeto não encontrado." });
+    return;
+  }
+  await clearPrdDraftSections(project.id);
+  res.json({ ok: true });
+});
+
+analysisRouter.post("/:id/prd/step", async (req: AuthedRequest, res) => {
+  try {
+    const project = await loadProjectForUser(req, req.params.id);
+    if (!project) {
+      res.status(404).json({ error: "Projeto não encontrado." });
+      return;
+    }
+
+    const { stepId, reset } = req.body as {
+      stepId?: string;
+      reset?: boolean;
+    };
+
+    if (!stepId || typeof stepId !== "string") {
+      res.status(400).json({ error: "Informe o stepId do passo do PRD." });
+      return;
+    }
+
+    const admin = getSupabaseAdmin();
+    const analysis = await getLatestAnalysis(project.id);
+    const gaps = analysis ? await readGaps(analysis.id) : [];
+    const { discovery, prototype } = await getSourceTexts(project.id);
+
+    if (!discovery.trim()) {
+      res.status(400).json({ error: "O Discovery deste projeto está vazio." });
+      return;
+    }
+
+    const respostas: Record<string, string> = {};
+    for (const gap of gaps) {
+      if (gap.resposta?.trim()) respostas[gap.id] = gap.resposta.trim();
+    }
+
+    const params: PrdGenParams = {
+      discovery,
+      prototype,
+      gaps,
+      respostas,
+      productName: project.name,
+    };
+
+    let sections = reset ? {} : await loadPrdDraftSections(project.id);
+    if (reset) {
+      await clearPrdDraftSections(project.id);
+    }
+
+    const result = await generatePrdStep(params, stepId, sections);
+
+    sections = { ...sections, [stepId]: result.content };
+    await savePrdDraftSections(project.id, sections);
+
+    if (!result.done) {
+      res.json(result);
+      return;
+    }
+
+    const prd = assemblePrd(project.name, discovery, sections);
+
+    const { data: last } = await admin
+      .from("prds")
+      .select("version")
+      .eq("project_id", project.id)
+      .order("version", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    const { data: prdRow } = await admin
+      .from("prds")
+      .insert({
+        project_id: project.id,
+        version: (last?.version ?? 0) + 1,
+        content_md: prd,
+        created_by: req.authUser?.id,
+      })
+      .select("*")
+      .single();
+
+    await clearPrdDraftSections(project.id);
+    res.json({ ...result, prd, prdRow });
+  } catch (error) {
+    if (error instanceof AnthropicError) {
+      res.status(502).json({ error: error.message });
+      return;
+    }
+    const message =
+      error instanceof Error ? error.message : "Erro desconhecido ao gerar o PRD.";
+    const isAbort =
+      error instanceof Error &&
+      (error.name === "AbortError" ||
+        error.name === "APIUserAbortError" ||
+        /aborted|socket hang up|ECONNRESET/i.test(message));
+    console.error(`Erro ao gerar passo do PRD (${req.body?.stepId}):`, error);
+    res.status(isAbort ? 502 : 500).json({
+      error: isAbort
+        ? "A geração desta seção foi interrompida (timeout). Tente novamente."
+        : message || "Erro ao gerar o PRD.",
+    });
+  }
+});
+
+// Legado: dispara geração completa via plano + passos (cliente deve preferir /prd/step).
 analysisRouter.post("/:id/prd", async (req: AuthedRequest, res) => {
   const project = await loadProjectForUser(req, req.params.id);
   if (!project) {
@@ -544,19 +705,11 @@ analysisRouter.post("/:id/prd", async (req: AuthedRequest, res) => {
     return;
   }
 
+  const { force: _force } = req.body as { force?: boolean };
+
   const admin = getSupabaseAdmin();
   const analysis = await getLatestAnalysis(project.id);
   const gaps = analysis ? await readGaps(analysis.id) : [];
-
-  const bloqueantes = gaps.filter(
-    (g) => g.severidade === "alta" && g.status !== "resolvido"
-  );
-  if (bloqueantes.length > 0) {
-    res.status(409).json({
-      error: `Existem ${bloqueantes.length} gap(s) de severidade alta em aberto. Resolva-os antes de gerar o PRD.`,
-    });
-    return;
-  }
 
   const { discovery, prototype } = await getSourceTexts(project.id);
   if (!discovery.trim()) {
@@ -569,14 +722,24 @@ analysisRouter.post("/:id/prd", async (req: AuthedRequest, res) => {
     if (gap.resposta?.trim()) respostas[gap.id] = gap.resposta.trim();
   }
 
+  const params: PrdGenParams = {
+    discovery,
+    prototype,
+    gaps,
+    respostas,
+    productName: project.name,
+  };
+
+  const steps = planPrdSteps(discovery);
+  const sections: Record<string, string> = {};
+
   try {
-    const prd = await generatePrd({
-      discovery,
-      prototype,
-      gaps,
-      respostas,
-      productName: project.name,
-    });
+    for (const step of steps) {
+      const result = await generatePrdStep(params, step.id, sections);
+      sections[result.stepId] = result.content;
+    }
+
+    const prd = assemblePrd(project.name, discovery, sections);
 
     const { data: last } = await admin
       .from("prds")
@@ -605,5 +768,332 @@ analysisRouter.post("/:id/prd", async (req: AuthedRequest, res) => {
     }
     console.error("Erro ao gerar PRD:", error);
     res.status(500).json({ error: "Erro ao gerar o PRD." });
+  }
+});
+
+// Lista a versão mais recente de cada documento de um grupo (spec | qa).
+analysisRouter.get("/:id/docs", async (req: AuthedRequest, res) => {
+  const project = await loadProjectForUser(req, req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Projeto não encontrado." });
+    return;
+  }
+
+  const group: SpecDocGroup = req.query.group === "qa" ? "qa" : "spec";
+  const admin = getSupabaseAdmin();
+  const { data: rows } = await admin
+    .from("project_docs")
+    .select("kind, content_md, version, created_at, updated_at")
+    .eq("project_id", project.id)
+    .order("version", { ascending: false });
+
+  type DocRow = {
+    kind: string;
+    content_md: string;
+    version: number;
+    created_at: string;
+    updated_at: string;
+  };
+  const latestByKind = new Map<string, DocRow>();
+  for (const row of (rows ?? []) as DocRow[]) {
+    if (!latestByKind.has(row.kind)) latestByKind.set(row.kind, row);
+  }
+
+  const docs = docOrderForGroup(group).map((kind) => {
+    const meta = SPEC_DOCS[kind];
+    const existing = latestByKind.get(kind);
+    return {
+      kind,
+      label: meta.label,
+      filename: meta.filename,
+      content_md: existing?.content_md ?? null,
+      version: existing?.version ?? 0,
+      updated_at: existing?.updated_at ?? null,
+    };
+  });
+
+  res.json({ docs });
+});
+
+async function loadDocGenContext(projectId: string, userId?: string) {
+  const admin = getSupabaseAdmin();
+  const { discovery, prototype } = await getSourceTexts(projectId);
+  const analysis = await getLatestAnalysis(projectId);
+  const gaps = analysis ? await readGaps(analysis.id) : [];
+  const respostas: Record<string, string> = {};
+  for (const gap of gaps) {
+    if (gap.resposta?.trim()) respostas[gap.id] = gap.resposta.trim();
+  }
+  const { data: latestPrd } = await admin
+    .from("prds")
+    .select("content_md")
+    .eq("project_id", projectId)
+    .order("version", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  return {
+    admin,
+    discovery,
+    prototype,
+    gaps,
+    respostas,
+    prd: latestPrd?.content_md ?? null,
+    userId,
+  };
+}
+
+async function persistProjectDoc(
+  admin: ReturnType<typeof getSupabaseAdmin>,
+  projectId: string,
+  kind: SpecDocKind,
+  content: string,
+  userId?: string
+) {
+  const { data: last } = await admin
+    .from("project_docs")
+    .select("version")
+    .eq("project_id", projectId)
+    .eq("kind", kind)
+    .order("version", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  const { data: docRow, error: insertError } = await admin
+    .from("project_docs")
+    .insert({
+      project_id: projectId,
+      kind,
+      content_md: content,
+      version: (last?.version ?? 0) + 1,
+      created_by: userId,
+    })
+    .select("kind, content_md, version, updated_at")
+    .single();
+
+  if (insertError) {
+    throw insertError;
+  }
+  return docRow;
+}
+
+/** Re-extrai protótipo se ainda não contém tokens visuais (upgrade de extração). */
+async function ensurePrototypeWithDesignTokens(
+  project: { id: string; discovery_file_key: string | null; prototype_file_key: string | null }
+): Promise<string | null> {
+  const { prototype } = await getSourceTexts(project.id);
+  if (prototype?.includes("EXTRAK_DESIGN_TOKENS_START")) {
+    return prototype;
+  }
+  if (!project.prototype_file_key || !project.discovery_file_key) {
+    return prototype;
+  }
+  await refreshProjectSources(project);
+  const refreshed = await getSourceTexts(project.id);
+  return refreshed.prototype;
+}
+
+analysisRouter.get("/:id/docs/design_system/plan", async (req: AuthedRequest, res) => {
+  const project = await loadProjectForUser(req, req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Projeto não encontrado." });
+    return;
+  }
+
+  const steps = planDesignSystemSteps();
+  res.json({
+    steps: steps.map((s) => ({
+      id: s.id,
+      label: s.label,
+      deterministic: Boolean(s.deterministic),
+    })),
+    total: steps.length,
+  });
+});
+
+analysisRouter.post("/:id/docs/design_system/step", async (req: AuthedRequest, res) => {
+  const project = await loadProjectForUser(req, req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Projeto não encontrado." });
+    return;
+  }
+
+  const { stepId, sections = {} } = req.body as {
+    stepId?: string;
+    sections?: Record<string, string>;
+  };
+
+  if (!stepId || typeof stepId !== "string") {
+    res.status(400).json({ error: "Informe o stepId do passo do Design System." });
+    return;
+  }
+
+  try {
+    const ctx = await loadDocGenContext(project.id, req.authUser?.id);
+    if (!ctx.discovery.trim()) {
+      res.status(400).json({ error: "O Discovery deste projeto está vazio." });
+      return;
+    }
+
+    const prototype = await ensurePrototypeWithDesignTokens({
+      id: project.id as string,
+      discovery_file_key: (project.discovery_file_key as string | null) ?? null,
+      prototype_file_key: (project.prototype_file_key as string | null) ?? null,
+    });
+
+    const params: DesignSystemGenParams = {
+      discovery: ctx.discovery,
+      prototype,
+      gaps: ctx.gaps,
+      respostas: ctx.respostas,
+      prd: ctx.prd,
+      productName: project.name,
+    };
+
+    const result = await generateDesignSystemStep(params, stepId, sections);
+
+    if (!result.done) {
+      res.json(result);
+      return;
+    }
+
+    const allSections = { ...sections, [stepId]: result.content };
+    const content = assembleDesignSystem(project.name, allSections);
+    const docRow = await persistProjectDoc(
+      ctx.admin,
+      project.id,
+      "design_system",
+      content,
+      req.authUser?.id
+    );
+
+    res.json({
+      ...result,
+      content_md: content,
+      doc: {
+        kind: "design_system" as const,
+        label: SPEC_DOCS.design_system.label,
+        filename: SPEC_DOCS.design_system.filename,
+        content_md: content,
+        version: docRow?.version ?? 1,
+        updated_at: docRow?.updated_at ?? null,
+      },
+    });
+  } catch (error) {
+    if (error instanceof AnthropicError) {
+      res.status(502).json({ error: error.message });
+      return;
+    }
+    console.error("Erro ao gerar passo do Design System:", error);
+    res.status(500).json({ error: "Erro ao gerar o Design System." });
+  }
+});
+
+// Gera (e persiste) UM documento do Pacote de Specs.
+analysisRouter.post("/:id/docs/:kind", async (req: AuthedRequest, res) => {
+  const project = await loadProjectForUser(req, req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Projeto não encontrado." });
+    return;
+  }
+
+  const kind = req.params.kind as SpecDocKind;
+  if (!SPEC_DOCS[kind]) {
+    res.status(400).json({ error: "Tipo de documento inválido." });
+    return;
+  }
+
+  if (kind === "design_system") {
+    res.status(400).json({
+      error:
+        "Use a geração em passos: GET /docs/design_system/plan e POST /docs/design_system/step.",
+    });
+    return;
+  }
+
+  const admin = getSupabaseAdmin();
+  const { discovery, prototype } = await getSourceTexts(project.id);
+  if (!discovery.trim()) {
+    res.status(400).json({ error: "O Discovery deste projeto está vazio." });
+    return;
+  }
+
+  const analysis = await getLatestAnalysis(project.id);
+  const gaps = analysis ? await readGaps(analysis.id) : [];
+  const respostas: Record<string, string> = {};
+  for (const gap of gaps) {
+    if (gap.resposta?.trim()) respostas[gap.id] = gap.resposta.trim();
+  }
+
+  const { data: latestPrd } = await admin
+    .from("prds")
+    .select("content_md")
+    .eq("project_id", project.id)
+    .order("version", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  try {
+    const content = await generateSpecDoc({
+      kind,
+      discovery,
+      prototype,
+      gaps,
+      respostas,
+      prd: latestPrd?.content_md ?? null,
+      productName: project.name,
+    });
+
+    const { data: last } = await admin
+      .from("project_docs")
+      .select("version")
+      .eq("project_id", project.id)
+      .eq("kind", kind)
+      .order("version", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    const { data: docRow, error: insertError } = await admin
+      .from("project_docs")
+      .insert({
+        project_id: project.id,
+        kind,
+        content_md: content,
+        version: (last?.version ?? 0) + 1,
+        created_by: req.authUser?.id,
+      })
+      .select("kind, content_md, version, updated_at")
+      .single();
+
+    if (insertError) {
+      console.error("Erro ao persistir documento:", insertError);
+      res.status(500).json({ error: "Erro ao salvar o documento gerado." });
+      return;
+    }
+
+    res.json({
+      kind,
+      label: SPEC_DOCS[kind].label,
+      filename: SPEC_DOCS[kind].filename,
+      content_md: content,
+      version: docRow?.version ?? 1,
+      updated_at: docRow?.updated_at ?? null,
+    });
+  } catch (error) {
+    if (error instanceof AnthropicError) {
+      res.status(502).json({ error: error.message });
+      return;
+    }
+    const message =
+      error instanceof Error ? error.message : "Erro desconhecido ao gerar o documento.";
+    const isAbort =
+      error instanceof Error &&
+      (error.name === "AbortError" || /aborted|socket hang up/i.test(message));
+    console.error("Erro ao gerar documento:", error);
+    res.status(isAbort ? 502 : 500).json({
+      error: isAbort
+        ? "A geração foi interrompida (timeout ou conexão). Tente novamente."
+        : "Erro ao gerar o documento.",
+    });
   }
 });

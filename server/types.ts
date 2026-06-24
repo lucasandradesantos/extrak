@@ -1,3 +1,34 @@
+export interface FigmaColor {
+  r: number;
+  g: number;
+  b: number;
+  a?: number;
+}
+
+export interface FigmaPaint {
+  type?: string;
+  visible?: boolean;
+  color?: FigmaColor;
+  opacity?: number;
+}
+
+export interface FigmaTextStyle {
+  fontFamily?: string;
+  fontPostScriptName?: string;
+  fontSize?: number;
+  fontWeight?: number;
+  lineHeightPx?: number;
+  letterSpacing?: number;
+}
+
+export interface FigmaEffect {
+  type?: string;
+  radius?: number;
+  offset?: { x: number; y: number };
+  color?: FigmaColor;
+  visible?: boolean;
+}
+
 export interface FigmaNode {
   id: string;
   name: string;
@@ -12,6 +43,11 @@ export interface FigmaNode {
     width: number;
     height: number;
   };
+  fills?: FigmaPaint[];
+  strokes?: FigmaPaint[];
+  style?: FigmaTextStyle;
+  effects?: FigmaEffect[];
+  cornerRadius?: number;
   // Campos de prototipagem (presentes em arquivos Figma Design)
   transitionNodeID?: string;
   reactions?: FigmaReaction[];
@@ -45,7 +81,24 @@ export interface FigmaFileResponse {
   components?: Record<string, unknown>;
   componentSets?: Record<string, unknown>;
   schemaVersion?: number;
-  styles?: Record<string, unknown>;
+  styles?: Record<
+    string,
+    {
+      key?: string;
+      name: string;
+      styleType?: string;
+      description?: string;
+    }
+  >;
+}
+
+export interface FigmaNodesResponse {
+  nodes: Record<
+    string,
+    {
+      document: FigmaNode;
+    } | null
+  >;
 }
 
 export interface FigmaComment {
@@ -126,6 +179,68 @@ export interface DesignSummary {
   screens: number;
   textNodes: number;
   flows: number;
+  /** Tokens visuais extraídos do Figma (cores, tipografia, etc.). */
+  designTokens?: {
+    colors: number;
+    typography: number;
+    effects: number;
+    variables: number;
+    components: number;
+    designSystemFrames: number;
+  };
+}
+
+export interface ParsedDesignTokenColor {
+  name: string;
+  hex: string;
+  styleId: string;
+}
+
+export interface ParsedDesignTokenTypography {
+  name: string;
+  fontFamily?: string;
+  fontSize?: number;
+  fontWeight?: number;
+  lineHeightPx?: number;
+  letterSpacing?: number;
+  styleId: string;
+}
+
+export interface ParsedDesignTokenEffect {
+  name: string;
+  description: string;
+  styleId: string;
+}
+
+export interface ParsedDesignTokenVariable {
+  name: string;
+  type: string;
+  values: string[];
+  variableId: string;
+  description?: string;
+}
+
+export interface ParsedDesignTokenComponent {
+  name: string;
+  description?: string;
+  componentId: string;
+  componentSetId?: string;
+}
+
+export interface ParsedDesignTokenFrame {
+  name: string;
+  page: string;
+  path: string;
+  texts: string[];
+}
+
+export interface ParsedDesignTokens {
+  colors: ParsedDesignTokenColor[];
+  typography: ParsedDesignTokenTypography[];
+  effects: ParsedDesignTokenEffect[];
+  variables: ParsedDesignTokenVariable[];
+  components: ParsedDesignTokenComponent[];
+  designSystemFrames: ParsedDesignTokenFrame[];
 }
 
 export interface ParsedDesign {

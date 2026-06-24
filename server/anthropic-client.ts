@@ -203,7 +203,14 @@ async function complete({
       }
     }
   } catch (error) {
-    if (timedOut) {
+    const isAbort =
+      timedOut ||
+      (error instanceof Error &&
+        (error.name === "AbortError" ||
+          error.name === "APIUserAbortError" ||
+          /abort/i.test(error.message)));
+
+    if (isAbort) {
       console.warn(
         `[anthropic] Geração interrompida no limite de ${deadlineMs}ms; ` +
           `usando saída parcial (${text.length} chars).`
