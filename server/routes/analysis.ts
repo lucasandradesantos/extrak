@@ -25,6 +25,13 @@ import {
   type PrdGenParams,
 } from "../prd-service";
 import {
+  assembleQaTestCasesDoc,
+  generateQaTestCasesStep,
+  planQaTestCasesSteps,
+  validateQaTestCasesDoc,
+  type QaGenParams,
+} from "../qa-service";
+import {
   SPEC_DOCS,
   type SpecDocGroup,
   type SpecDocKind,
@@ -802,13 +809,17 @@ analysisRouter.get("/:id/docs", async (req: AuthedRequest, res) => {
   const docs = docOrderForGroup(group).map((kind) => {
     const meta = SPEC_DOCS[kind];
     const existing = latestByKind.get(kind);
+    const content_md = existing?.content_md ?? null;
     return {
       kind,
       label: meta.label,
       filename: meta.filename,
-      content_md: existing?.content_md ?? null,
+      content_md,
       version: existing?.version ?? 0,
       updated_at: existing?.updated_at ?? null,
+      ...(kind === "qa_test_cases" && content_md
+        ? { qa_validation: validateQaTestCasesDoc(content_md) }
+        : {}),
     };
   });
 
@@ -892,6 +903,102 @@ async function ensurePrototypeWithDesignTokens(
   const refreshed = await getSourceTexts(project.id);
   return refreshed.prototype;
 }
+
+analysisRouter.get("/:id/docs/qa_test_cases/plan", async (req: AuthedRequest, res) => {
+  const project = await loadProjectForUser(req, req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Projeto não encontrado." });
+    return;
+  }
+
+  const { discovery } = await getSourceTexts(project.id);
+  const steps = planQaTestCasesSteps(discovery);
+  res.json({
+    steps: steps.map((s) => ({
+      id: s.id,
+      label: s.label,
+      kind: s.kind,
+    })),
+    total: steps.length,
+  });
+});
+
+analysisRouter.post("/:id/docs/qa_test_cases/step", async (req: AuthedRequest, res) => {
+  const project = await loadProjectForUser(req, req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Projeto não encontrado." });
+    return;
+  }
+
+  const { stepId, sections = {} } = req.body as {
+    stepId?: string;
+    sections?: Record<string, string>;
+  };
+
+  if (!stepId || typeof stepId !== "string") {
+    res.status(400).json({ error: "Informe o stepId do passo de QA." });
+    return;
+  }
+
+  try {
+    const ctx = await loadDocGenContext(project.id, req.authUser?.id);
+    if (!ctx.discovery.trim()) {
+      res.status(400).json({ error: "O Discovery deste projeto está vazio." });
+      return;
+    }
+
+    const params: QaGenParams = {
+      discovery: ctx.discovery,
+      prototype: ctx.prototype,
+      gaps: ctx.gaps,
+      respostas: ctx.respostas,
+      prd: ctx.prd,
+      productName: project.name,
+    };
+
+    const result = await generateQaTestCasesStep(params, stepId, sections);
+
+    if (!result.done) {
+      res.json(result);
+      return;
+    }
+
+    const allSections = { ...sections, [stepId]: result.content };
+    const steps = planQaTestCasesSteps(ctx.discovery);
+    const content = assembleQaTestCasesDoc(project.name, allSections, steps);
+    const validation = validateQaTestCasesDoc(content);
+
+    const docRow = await persistProjectDoc(
+      ctx.admin,
+      project.id,
+      "qa_test_cases",
+      content,
+      req.authUser?.id
+    );
+
+    res.json({
+      ...result,
+      content_md: content,
+      qa_validation: validation,
+      doc: {
+        kind: "qa_test_cases" as const,
+        label: SPEC_DOCS.qa_test_cases.label,
+        filename: SPEC_DOCS.qa_test_cases.filename,
+        content_md: content,
+        version: docRow?.version ?? 1,
+        updated_at: docRow?.updated_at ?? null,
+        qa_validation: validation,
+      },
+    });
+  } catch (error) {
+    if (error instanceof AnthropicError) {
+      res.status(502).json({ error: error.message });
+      return;
+    }
+    console.error("Erro ao gerar passo de QA:", error);
+    res.status(500).json({ error: "Erro ao gerar os casos de teste." });
+  }
+});
 
 analysisRouter.get("/:id/docs/design_system/plan", async (req: AuthedRequest, res) => {
   const project = await loadProjectForUser(req, req.params.id);
@@ -1007,6 +1114,14 @@ analysisRouter.post("/:id/docs/:kind", async (req: AuthedRequest, res) => {
     res.status(400).json({
       error:
         "Use a geração em passos: GET /docs/design_system/plan e POST /docs/design_system/step.",
+    });
+    return;
+  }
+
+  if (kind === "qa_test_cases") {
+    res.status(400).json({
+      error:
+        "Use a geração em passos: GET /docs/qa_test_cases/plan e POST /docs/qa_test_cases/step.",
     });
     return;
   }

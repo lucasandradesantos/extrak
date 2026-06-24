@@ -25,6 +25,7 @@ import { SourceViewPanel } from "../components/SourceViewPanel";
 import { apiFetch } from "../lib/api";
 import { downloadDocsAsZip, downloadText, sanitizeFilename } from "../lib/download";
 import { humanizeApiError } from "../lib/humanizeApiError";
+import { validateQaTestCasesDoc } from "../lib/qaValidation";
 import { formatActor } from "../lib/actors";
 import {
   SEVERIDADE_LABELS,
@@ -89,12 +90,30 @@ function groupBySeveridade(gaps: Gap[]): Map<GapSeveridade, Gap[]> {
   return grouped;
 }
 
+function flattenSourceSummary(
+  summary: NonNullable<NonNullable<ProjectSource["metadata"]>["summary"]>
+): Array<{ key: string; value: number }> {
+  const items: Array<{ key: string; value: number }> = [];
+  for (const [key, value] of Object.entries(summary)) {
+    if (typeof value === "number") {
+      items.push({ key, value });
+    } else if (value && typeof value === "object") {
+      for (const [nestedKey, nestedValue] of Object.entries(value)) {
+        if (typeof nestedValue === "number") {
+          items.push({ key: nestedKey, value: nestedValue });
+        }
+      }
+    }
+  }
+  return items;
+}
+
 function sourceSummaryChips(source: ProjectSource | undefined) {
   const summary = source?.metadata?.summary;
   if (!summary) return null;
   return (
     <Space wrap>
-      {Object.entries(summary).map(([key, value]) => (
+      {flattenSourceSummary(summary).map(({ key, value }) => (
         <Tag key={key}>
           {value} {key}
         </Tag>
@@ -154,6 +173,11 @@ export function ProjectPage() {
   const [qaDocs, setQaDocs] = useState<SpecDoc[]>([]);
   const [qaDocsLoading, setQaDocsLoading] = useState(false);
   const [qaDocsError, setQaDocsError] = useState<string | null>(null);
+  const [qaProgress, setQaProgress] = useState<{
+    current: number;
+    total: number;
+    label: string;
+  } | null>(null);
 
   const [history, setHistory] = useState<AnalysisHistoryItem[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -315,6 +339,14 @@ export function ProjectPage() {
   const discoverySource = detail?.sources.find((s) => s.kind === "discovery");
   const prototypeSource = detail?.sources.find((s) => s.kind === "prototype");
   const hasAnalyzed = gaps.length > 0 || detail?.analysis?.status === "done";
+  const qaTestCasesDoc = qaDocs.find((d) => d.kind === "qa_test_cases");
+  const qaIncompleteValidation = useMemo(() => {
+    if (!qaTestCasesDoc?.content_md) return null;
+    return (
+      qaTestCasesDoc.qa_validation ??
+      validateQaTestCasesDoc(qaTestCasesDoc.content_md)
+    );
+  }, [qaTestCasesDoc]);
   const figmaReminderAvailable = Boolean(
     detail?.project.discovery_file_key || detail?.project.prototype_file_key
   );
@@ -657,10 +689,87 @@ export function ProjectPage() {
     }
   }
 
+  async function generateQaTestCasesDoc(): Promise<boolean> {
+    if (!id) return false;
+    setDocBusyKind("qa_test_cases");
+    setQaDocsError(null);
+    setQaProgress(null);
+
+    try {
+      const plan = await apiFetch<{
+        steps: Array<{ id: string; label: string }>;
+        total: number;
+      }>(`/api/projects/${id}/docs/qa_test_cases/plan`, {
+        fallback: "Erro ao planejar os casos de teste.",
+      });
+
+      const sections: Record<string, string> = {};
+
+      for (const step of plan.steps) {
+        setQaProgress({
+          current: plan.steps.indexOf(step),
+          total: plan.total,
+          label: step.label,
+        });
+
+        let lastError: Error | null = null;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const result = await apiFetch<{
+              stepId: string;
+              content: string;
+              index: number;
+              total: number;
+              done: boolean;
+              doc?: SpecDoc;
+            }>(`/api/projects/${id}/docs/qa_test_cases/step`, {
+              method: "POST",
+              body: { stepId: step.id, sections },
+              fallback: `Erro ao gerar: ${step.label}`,
+            });
+
+            sections[result.stepId] = result.content;
+            if (result.done && result.doc) {
+              setQaDocs((prev) =>
+                prev.map((d) => (d.kind === "qa_test_cases" ? result.doc! : d))
+              );
+            }
+            lastError = null;
+            break;
+          } catch (err) {
+            lastError = err instanceof Error ? err : new Error(String(err));
+            if (attempt === 0) {
+              await new Promise((r) => setTimeout(r, 1500));
+            }
+          }
+        }
+
+        if (lastError) {
+          throw new Error(
+            `${lastError.message} — clique em "Gerar novamente" para retomar de "${step.label}".`
+          );
+        }
+      }
+
+      return true;
+    } catch (err) {
+      setQaDocsError(
+        err instanceof Error ? err.message : "Erro ao gerar os casos de teste."
+      );
+      return false;
+    } finally {
+      setDocBusyKind(null);
+      setQaProgress(null);
+    }
+  }
+
   async function generateDoc(kind: string, group: "spec" | "qa"): Promise<boolean> {
     if (!id) return false;
     if (kind === "design_system" && group === "spec") {
       return generateDesignSystemDoc();
+    }
+    if (kind === "qa_test_cases" && group === "qa") {
+      return generateQaTestCasesDoc();
     }
     const isQa = group === "qa";
     const setItems = isQa ? setQaDocs : setDocs;
@@ -696,12 +805,63 @@ export function ProjectPage() {
     }
   }
 
-  async function downloadAllDocs(items: SpecDoc[]) {
+  async function downloadAllDocs(items: SpecDoc[], options?: { requireQaComplete?: boolean }) {
     if (!detail) return;
+
+    if (options?.requireQaComplete) {
+      const qaDoc = items.find((d) => d.kind === "qa_test_cases" && d.content_md);
+      if (qaDoc?.content_md) {
+        const validation =
+          qaDoc.qa_validation ?? validateQaTestCasesDoc(qaDoc.content_md);
+        if (!validation.complete) {
+          Modal.warning({
+            title: "Documento de QA incompleto",
+            content: (
+              <div>
+                <p>O pacote não pode ser enviado ao cliente neste estado.</p>
+                <ul style={{ marginTop: 8, paddingLeft: 20 }}>
+                  {validation.issues.map((issue) => (
+                    <li key={issue}>{issue}</li>
+                  ))}
+                </ul>
+                <p style={{ marginTop: 8 }}>
+                  Clique em <strong>Gerar novamente</strong> para produzir o documento
+                  completo.
+                </p>
+              </div>
+            ),
+          });
+          return;
+        }
+      }
+    }
+
     const files = items
       .filter((doc) => doc.content_md)
       .map((doc) => ({ filename: doc.filename, content: doc.content_md! }));
     await downloadDocsAsZip(files, detail.project.name);
+  }
+
+  function downloadQaMarkdown(doc: SpecDoc) {
+    if (!doc.content_md) return;
+    const validation = doc.qa_validation ?? validateQaTestCasesDoc(doc.content_md);
+    if (!validation.complete) {
+      Modal.warning({
+        title: "Documento de QA incompleto",
+        content: (
+          <div>
+            <p>Este arquivo parece truncado ou sem as seções obrigatórias.</p>
+            <ul style={{ marginTop: 8, paddingLeft: 20 }}>
+              {validation.issues.map((issue) => (
+                <li key={issue}>{issue}</li>
+              ))}
+            </ul>
+          </div>
+        ),
+      });
+      return;
+    }
+    downloadText(doc.content_md, doc.filename);
   }
 
   async function handleCopy(text: string, label: string) {
@@ -1247,11 +1407,39 @@ export function ProjectPage() {
 
           <Flex wrap="wrap" gap={8} style={{ marginBottom: 16 }}>
             {qaDocs.some((d) => d.content_md) && (
-              <Button onClick={() => downloadAllDocs(qaDocs)}>
+              <Button
+                onClick={() => downloadAllDocs(qaDocs, { requireQaComplete: true })}
+              >
                 Baixar pacote (.zip)
               </Button>
             )}
           </Flex>
+
+          {qaIncompleteValidation && !qaIncompleteValidation.complete && (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message="Documento de QA incompleto — não envie ao cliente"
+              description={
+                <ul style={{ margin: "8px 0 0", paddingLeft: 20 }}>
+                  {qaIncompleteValidation.issues.map((issue) => (
+                    <li key={issue}>{issue}</li>
+                  ))}
+                </ul>
+              }
+            />
+          )}
+
+          {qaProgress && (
+            <Alert
+              type="info"
+              showIcon
+              style={{ marginBottom: 16 }}
+              message={`Gerando Casos de Teste — ${qaProgress.current + 1}/${qaProgress.total}: ${qaProgress.label}`}
+              description="Mantenha esta aba aberta até concluir. Projetos grandes são gerados em vários passos para evitar truncamento."
+            />
+          )}
 
           {!hasAnalyzed && (
             <Empty description="Rode a análise antes de gerar os casos de teste." />
@@ -1313,7 +1501,7 @@ export function ProjectPage() {
                             </Button>
                             <Button
                               size="small"
-                              onClick={() => downloadText(doc.content_md!, doc.filename)}
+                              onClick={() => downloadQaMarkdown(doc)}
                             >
                               Baixar .md
                             </Button>

@@ -95,12 +95,21 @@ export interface FigmaPreviewResult {
   images: FigmaPreviewImage[];
 }
 
+export interface SourceSummaryDesignTokens {
+  colors: number;
+  typography: number;
+  effects: number;
+  variables: number;
+  components: number;
+  designSystemFrames: number;
+}
+
 export interface SourceMetadata {
   name?: string;
   editorType?: string;
   version?: string;
   lastModified?: string;
-  summary?: Record<string, number>;
+  summary?: Record<string, number | SourceSummaryDesignTokens>;
 }
 
 export interface ProjectSource {
@@ -160,6 +169,7 @@ export interface SpecDoc {
   content_md: string | null;
   version: number;
   updated_at: string | null;
+  qa_validation?: { complete: boolean; issues: string[] };
 }
 
 export interface AnalysisSourceMetadata {
