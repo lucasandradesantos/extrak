@@ -21,6 +21,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { useAnalysis } from "../analysis/AnalysisContext";
 import { GapCard } from "../components/GapCard";
 import { ProjectFormModal, type ProjectFormValues } from "../components/ProjectFormModal";
+import { ScopeTab } from "../components/ScopeTab";
 import { SourceViewPanel } from "../components/SourceViewPanel";
 import { apiFetch } from "../lib/api";
 import { downloadDocsAsZip, downloadText, sanitizeFilename } from "../lib/download";
@@ -51,6 +52,7 @@ type Tab =
   | "prototype"
   | "analise"
   | "prd"
+  | "escopo"
   | "specs"
   | "qa"
   | "historico";
@@ -1016,6 +1018,7 @@ export function ProjectPage() {
       label: `Análise (IA)${gaps.length > 0 ? ` · ${gaps.length}` : ""}`,
     },
     { key: "prd", label: "PRD" },
+    { key: "escopo", label: "Escopo" },
     { key: "specs", label: "Specs" },
     { key: "qa", label: "QA" },
     { key: "historico", label: "Histórico" },
@@ -1310,6 +1313,14 @@ export function ProjectPage() {
 
           {prd && <pre className="prd-pre">{prd}</pre>}
         </Card>
+      )}
+
+      {tab === "escopo" && (
+        <ScopeTab
+          projectId={detail.project.id}
+          projectName={detail.project.name}
+          hasDiscovery={Boolean(discoverySource?.discovery_text?.trim())}
+        />
       )}
 
       {tab === "specs" && (

@@ -5,6 +5,7 @@ import {
   Empty,
   Form,
   Input,
+  InputNumber,
   Select,
   Space,
   Table,
@@ -15,7 +16,7 @@ import { useEffect, useState } from "react";
 import { useAuth } from "../auth/AuthContext";
 import { apiFetch } from "../lib/api";
 import { ROLE_LABELS } from "../lib/labels";
-import type { AdminUser, Team, UserRole } from "../types";
+import type { AdminUser, ScopeConfig, Team, UserRole } from "../types";
 
 const { Paragraph, Title } = Typography;
 
@@ -40,9 +41,12 @@ export function AdminPage() {
   const [keyStatus, setKeyStatus] = useState<AnthropicKeyStatus | null>(null);
   const [savingKey, setSavingKey] = useState(false);
 
+  const [savingScopeConfig, setSavingScopeConfig] = useState(false);
+
   const [teamForm] = Form.useForm();
   const [userForm] = Form.useForm();
   const [keyForm] = Form.useForm();
+  const [scopeForm] = Form.useForm();
 
   async function loadAll() {
     try {
@@ -73,11 +77,65 @@ export function AdminPage() {
     }
   }
 
+  async function loadScopeConfig() {
+    try {
+      const { config } = await apiFetch<{ config: ScopeConfig }>(
+        "/api/admin/settings/scope",
+        { fallback: "Erro ao carregar a configuração de escopo." }
+      );
+      scopeForm.setFieldsValue({
+        hourly_rate: config.hourly_rate,
+        platform_multipliers: config.platform_multipliers,
+        buffers: config.buffers,
+        complexity_ranges: config.complexity_ranges,
+        phases: config.phases.join(", "),
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erro ao carregar a configuração.");
+    }
+  }
+
   useEffect(() => {
     loadAll();
-    if (isSuper) loadKeyStatus();
+    if (isSuper) {
+      loadKeyStatus();
+      loadScopeConfig();
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isSuper]);
+
+  async function handleSaveScopeConfig(values: {
+    hourly_rate: number;
+    platform_multipliers: ScopeConfig["platform_multipliers"];
+    buffers: ScopeConfig["buffers"];
+    complexity_ranges: ScopeConfig["complexity_ranges"];
+    phases: string;
+  }) {
+    setSavingScopeConfig(true);
+    setError(null);
+    try {
+      const config: ScopeConfig = {
+        hourly_rate: values.hourly_rate,
+        platform_multipliers: values.platform_multipliers,
+        buffers: values.buffers,
+        complexity_ranges: values.complexity_ranges,
+        phases: values.phases
+          .split(",")
+          .map((p) => p.trim())
+          .filter(Boolean),
+      };
+      const { config: saved } = await apiFetch<{ config: ScopeConfig }>(
+        "/api/admin/settings/scope",
+        { method: "PUT", body: { config }, fallback: "Erro ao salvar a configuração." }
+      );
+      scopeForm.setFieldsValue({ phases: saved.phases.join(", ") });
+      flash("Configuração de escopo salva.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Erro ao salvar a configuração.");
+    } finally {
+      setSavingScopeConfig(false);
+    }
+  }
 
   function flash(message: string) {
     setFeedback(message);
@@ -272,6 +330,84 @@ export function AdminPage() {
                 </Button>
               </Form.Item>
             )}
+          </Form>
+        </Card>
+      )}
+
+      {isSuper && (
+        <Card>
+          <Title level={4} style={{ marginTop: 0 }}>
+            Cálculo de escopo
+          </Title>
+          <Paragraph type="secondary" style={{ fontSize: 13 }}>
+            Parâmetros globais usados pela calculadora de escopo: valor da hora,
+            multiplicadores por plataforma, buffers de QA/Produto, horas-base por
+            complexidade e fases. Aplica-se a todos os projetos.
+          </Paragraph>
+
+          <Form
+            form={scopeForm}
+            layout="vertical"
+            onFinish={handleSaveScopeConfig}
+            requiredMark={false}
+          >
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+                gap: 16,
+              }}
+            >
+              <Form.Item label="Valor da hora (R$)" name="hourly_rate">
+                <InputNumber min={0} step={10} style={{ width: "100%" }} />
+              </Form.Item>
+              <Form.Item label="Multiplicador — Web" name={["platform_multipliers", "web"]}>
+                <InputNumber min={0} step={0.1} style={{ width: "100%" }} />
+              </Form.Item>
+              <Form.Item
+                label="Multiplicador — Mobile nativo"
+                name={["platform_multipliers", "mobile_native"]}
+              >
+                <InputNumber min={0} step={0.1} style={{ width: "100%" }} />
+              </Form.Item>
+              <Form.Item
+                label="Multiplicador — Mobile responsivo"
+                name={["platform_multipliers", "mobile_responsive"]}
+              >
+                <InputNumber min={0} step={0.1} style={{ width: "100%" }} />
+              </Form.Item>
+              <Form.Item label="Buffer QA (fração)" name={["buffers", "qa"]}>
+                <InputNumber min={0} max={1} step={0.05} style={{ width: "100%" }} />
+              </Form.Item>
+              <Form.Item label="Buffer Produto (fração)" name={["buffers", "product"]}>
+                <InputNumber min={0} max={1} step={0.05} style={{ width: "100%" }} />
+              </Form.Item>
+              <Form.Item
+                label="Horas-base — Simples"
+                name={["complexity_ranges", "simples"]}
+              >
+                <InputNumber min={1} step={1} style={{ width: "100%" }} />
+              </Form.Item>
+              <Form.Item label="Horas-base — Média" name={["complexity_ranges", "media"]}>
+                <InputNumber min={1} step={1} style={{ width: "100%" }} />
+              </Form.Item>
+              <Form.Item
+                label="Horas-base — Difícil"
+                name={["complexity_ranges", "dificil"]}
+              >
+                <InputNumber min={1} step={1} style={{ width: "100%" }} />
+              </Form.Item>
+            </div>
+            <Form.Item
+              label="Fases (separadas por vírgula)"
+              name="phases"
+              rules={[{ required: true, message: "Informe ao menos uma fase." }]}
+            >
+              <Input placeholder="MVP, V2, V3" />
+            </Form.Item>
+            <Button type="primary" htmlType="submit" loading={savingScopeConfig}>
+              Salvar configuração
+            </Button>
           </Form>
         </Card>
       )}

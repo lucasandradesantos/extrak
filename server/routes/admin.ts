@@ -13,6 +13,11 @@ import {
   getSetting,
   setSetting,
 } from "../settings";
+import {
+  getScopeConfig,
+  saveScopeConfig,
+  type ScopeConfig,
+} from "../scope-service";
 
 export const adminRouter = Router();
 
@@ -327,6 +332,27 @@ adminRouter.delete(
       source: hasEnv ? "env" : null,
       masked: hasEnv ? maskKey(envKey!) : null,
     });
+  }
+);
+
+// Configuração global da calculadora de escopo (hourly rate, multiplicadores,
+// buffers, faixas de complexidade, fases). Leitura para qualquer usuário autenticado.
+adminRouter.get("/settings/scope", async (_req: AuthedRequest, res) => {
+  const config = await getScopeConfig();
+  res.json({ config });
+});
+
+adminRouter.put(
+  "/settings/scope",
+  requireSuperAdmin,
+  async (req: AuthedRequest, res) => {
+    const { config } = req.body as { config?: Partial<ScopeConfig> };
+    if (!config || typeof config !== "object") {
+      res.status(400).json({ error: "Configuração inválida." });
+      return;
+    }
+    const saved = await saveScopeConfig(config, req.authUser?.id);
+    res.json({ config: saved });
   }
 );
 

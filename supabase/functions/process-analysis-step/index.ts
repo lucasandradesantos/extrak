@@ -24,14 +24,16 @@ const STALE_MS = 2 * 60 * 1000;
 
 const SELF_URL = `${SUPABASE_URL}/functions/v1/process-analysis-step`;
 
-type JobType = "analysis" | "prd";
+type JobType = "analysis" | "prd" | "scope";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function internalPath(jobType: JobType): string {
-  return jobType === "prd" ? "/api/internal/prd/step" : "/api/internal/analysis/step";
+  if (jobType === "prd") return "/api/internal/prd/step";
+  if (jobType === "scope") return "/api/internal/scope/step";
+  return "/api/internal/analysis/step";
 }
 
 async function callInternalStep(
@@ -99,25 +101,36 @@ async function recoverStaleJobs(startedAt: number): Promise<number> {
 
   const cutoff = new Date(Date.now() - STALE_MS).toISOString();
 
-  const [{ data: analysisJobs, error: analysisError }, { data: prdJobs, error: prdError }] =
-    await Promise.all([
-      admin
-        .from("analysis_jobs")
-        .select("project_id, updated_at")
-        .eq("status", "running")
-        .lt("updated_at", cutoff),
-      admin
-        .from("prd_jobs")
-        .select("project_id, updated_at")
-        .eq("status", "running")
-        .lt("updated_at", cutoff),
-    ]);
+  const [
+    { data: analysisJobs, error: analysisError },
+    { data: prdJobs, error: prdError },
+    { data: scopeJobs, error: scopeError },
+  ] = await Promise.all([
+    admin
+      .from("analysis_jobs")
+      .select("project_id, updated_at")
+      .eq("status", "running")
+      .lt("updated_at", cutoff),
+    admin
+      .from("prd_jobs")
+      .select("project_id, updated_at")
+      .eq("status", "running")
+      .lt("updated_at", cutoff),
+    admin
+      .from("scope_jobs")
+      .select("project_id, updated_at")
+      .eq("status", "running")
+      .lt("updated_at", cutoff),
+  ]);
 
   if (analysisError) {
     console.error("[edge] erro ao buscar analysis jobs travados:", analysisError);
   }
   if (prdError) {
     console.error("[edge] erro ao buscar prd jobs travados:", prdError);
+  }
+  if (scopeError) {
+    console.error("[edge] erro ao buscar scope jobs travados:", scopeError);
   }
 
   const invocations: Array<{ projectId: string; jobType: JobType }> = [
@@ -128,6 +141,10 @@ async function recoverStaleJobs(startedAt: number): Promise<number> {
     ...(prdJobs ?? []).map((j) => ({
       projectId: j.project_id as string,
       jobType: "prd" as const,
+    })),
+    ...(scopeJobs ?? []).map((j) => ({
+      projectId: j.project_id as string,
+      jobType: "scope" as const,
     })),
   ];
 
@@ -165,7 +182,8 @@ Deno.serve(async (req) => {
     );
   }
 
-  const jobType: JobType = body.jobType === "prd" ? "prd" : "analysis";
+  const jobType: JobType =
+    body.jobType === "prd" || body.jobType === "scope" ? body.jobType : "analysis";
 
   if (body.projectId) {
     await processProject(body.projectId, jobType, startedAt);

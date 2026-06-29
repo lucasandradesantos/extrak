@@ -2,6 +2,7 @@ import "dotenv/config";
 import cors from "cors";
 import express from "express";
 import { probeAnthropicCredits } from "./anthropic-client";
+import { recoverLocalJobs } from "./analysis-worker-client";
 import { type AuthedRequest, requireAuth } from "./auth";
 import { adminRouter } from "./routes/admin";
 import { analysisRouter } from "./routes/analysis";
@@ -64,6 +65,8 @@ app.use(
 if (!process.env.VERCEL) {
   app.listen(PORT, () => {
     console.log(`Server running on http://localhost:${PORT}`);
+    // Retoma jobs órfãos após restart (hot-reload/crash) no dev local.
+    setTimeout(() => void recoverLocalJobs(), 2000);
   });
 }
 

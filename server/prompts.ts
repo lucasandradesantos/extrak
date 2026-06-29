@@ -184,6 +184,89 @@ export function buildPrdPrompt(params: PrdParams): string {
   return parts.join("\n");
 }
 
+// ----------------------------------------------------------------------------
+// Escopo (calculadora de horas) — extrai módulos/features do Discovery.
+// ----------------------------------------------------------------------------
+
+export const SCOPE_SYSTEM = `Você é um Tech Lead sênior estimando o escopo de um projeto low-code a partir de um Discovery (extraído de um board FigJam). Você analisa UM TRECHO do Discovery por vez.
+
+Seu trabalho é identificar os MÓDULOS e as FUNCIONALIDADES (features) evidentes NESTE TRECHO, para que outra etapa calcule as horas. NÃO calcule horas — apenas classifique complexidade e fatores.
+
+REGRA DE OURO, inegociável: NUNCA invente módulos, features, integrações ou APIs que não estejam descritos no Discovery. Cada feature DEVE apontar os frames/telas/seções de origem em "origin_frames". Se não houver origem rastreável, não crie a feature. Quando estiver incerto sobre a existência ou o tamanho de algo, marque "confidence": "low" e seja conservador.
+
+Para CADA módulo, gere um objeto com EXATAMENTE estes campos:
+- "name": nome curto do módulo.
+- "category": categoria funcional (ex.: "Cadastro", "Operação", "Backoffice", "Relatórios", "Integração").
+- "description_client": descrição de 1 frase, em linguagem de cliente.
+- "is_mandatory": true se o módulo é base/obrigatório para o produto funcionar (ex.: autenticação, cadastro essencial); senão false.
+- "mandatory_reason": se is_mandatory=true, o porquê em 1 frase; senão "".
+- "features": array de features do módulo. Para CADA feature:
+  - "title": título curto.
+  - "description": o que a feature faz, 1–2 frases.
+  - "platforms": subconjunto de ["web","mobile_native","mobile_responsive"] em que a feature existe (use o que o Discovery indicar; na dúvida, ["web"]).
+  - "suggested_phase": uma de "MVP" | "V2" | "V3" (o que parece essencial vai para MVP).
+  - "complexity_weight": 1 (simples), 2 (média) ou 3 (difícil).
+  - "lowcode_factor": número entre 0.4 e 1.0 — quanto a plataforma low-code acelera esta feature (0.4 = muito acelerada por componentes prontos; 1.0 = precisa de código sob medida).
+  - "origin_frames": array de strings com os frames/telas/seções do Discovery que justificam a feature (obrigatório, não-vazio).
+  - "confidence": "low" | "medium" | "high".
+
+RESPONDA APENAS com um array JSON de módulos, sem nenhum texto antes ou depois, sem comentários e sem cercas de código. Se o trecho não contiver módulos/features, responda [].`;
+
+export interface ScopeChunkPromptParams {
+  discovery: string;
+  productName?: string;
+  salesModel?: "fechado" | "banco_horas";
+  chunkIndex?: number | null;
+  chunkTotal?: number;
+  previousModuleNames?: string[];
+}
+
+export function buildScopeChunkPrompt(params: ScopeChunkPromptParams): string {
+  const { discovery, productName, salesModel, chunkIndex, chunkTotal, previousModuleNames } =
+    params;
+  const parts: string[] = [];
+
+  if (productName) {
+    parts.push(`# Produto: ${productName}\n`);
+  }
+
+  if (salesModel === "fechado") {
+    parts.push(
+      "# Modelo de venda: Escopo fechado\n" +
+        "A Extrak assume o risco de estouro de prazo. Seja CONSERVADOR: na dúvida entre dois níveis de complexidade, escolha o maior, e use lowcode_factor mais alto (menos otimista) quando a feature tiver incerteza. Não subestime.\n"
+    );
+  } else if (salesModel === "banco_horas") {
+    parts.push(
+      "# Modelo de venda: Banco de horas\n" +
+        "O cliente compra horas conforme o desenvolvimento avança. Estime de forma realista e equilibrada (nem otimista, nem inflada).\n"
+    );
+  }
+
+  if (chunkIndex != null && chunkTotal != null && chunkTotal > 1) {
+    parts.push(
+      `# Trecho ${chunkIndex + 1} de ${chunkTotal} do Discovery\n` +
+        "Analise APENAS o trecho abaixo. Não tente cobrir o produto inteiro.\n"
+    );
+  }
+
+  if (previousModuleNames && previousModuleNames.length > 0) {
+    parts.push(
+      "\n# Módulos já identificados em trechos anteriores\n" +
+        "Se um módulo abaixo reaparecer neste trecho, use EXATAMENTE o mesmo nome (as features serão mescladas). Só crie um módulo novo se realmente for diferente.\n" +
+        previousModuleNames.map((n) => `- ${n}`).join("\n") +
+        "\n"
+    );
+  }
+
+  parts.push("\n# Discovery estruturado (extraído do FigJam) — trecho\n");
+  parts.push(discovery);
+  parts.push(
+    "\n\nGere agora o array JSON de módulos deste trecho seguindo estritamente as regras do sistema. Lembre: toda feature precisa de origin_frames rastreáveis."
+  );
+
+  return parts.join("\n");
+}
+
 export type PrdSectionKind =
   | "overview"
   | "personas"

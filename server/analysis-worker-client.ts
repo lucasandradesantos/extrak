@@ -1,7 +1,9 @@
 import { runAnalysisStep } from "./analysis-runner";
 import { runPrdStep } from "./prd-runner";
+import { runScopeStep } from "./scope-runner";
+import { getSupabaseAdmin } from "./supabase";
 
-export type WorkerJobType = "analysis" | "prd";
+export type WorkerJobType = "analysis" | "prd" | "scope";
 
 function workerSecret(): string | null {
   return process.env.ANALYSIS_WORKER_SECRET?.trim() || null;
@@ -24,7 +26,9 @@ function sleep(ms: number): Promise<void> {
 }
 
 function internalStepPath(jobType: WorkerJobType): string {
-  return jobType === "prd" ? "/api/internal/prd/step" : "/api/internal/analysis/step";
+  if (jobType === "prd") return "/api/internal/prd/step";
+  if (jobType === "scope") return "/api/internal/scope/step";
+  return "/api/internal/analysis/step";
 }
 
 /**
@@ -65,6 +69,10 @@ export function scheduleAnalysisWorker(projectId: string): void {
 
 export function schedulePrdWorker(projectId: string): void {
   scheduleWorker(projectId, "prd");
+}
+
+export function scheduleScopeWorker(projectId: string): void {
+  scheduleWorker(projectId, "scope");
 }
 
 async function callInternalStep(
@@ -111,7 +119,9 @@ export async function chainJobOnServer(
     const result =
       jobType === "prd"
         ? await runPrdStep(projectId, { force: !secret })
-        : await runAnalysisStep(projectId, { force: !secret });
+        : jobType === "scope"
+          ? await runScopeStep(projectId, { force: !secret })
+          : await runAnalysisStep(projectId, { force: !secret });
 
     if (result.skipped) {
       await sleep(1500);
@@ -124,4 +134,40 @@ export async function chainJobOnServer(
 /** @deprecated Use chainJobOnServer */
 export async function chainAnalysisOnServer(projectId: string): Promise<void> {
   return chainJobOnServer(projectId, "analysis");
+}
+
+/**
+ * Recuperação local: ao subir o servidor, retoma jobs que ficaram "running" —
+ * ex.: o processo reiniciou (hot-reload no dev, deploy, crash) e matou o loop
+ * em memória. Só roda no fallback local (sem Edge Function); em produção a
+ * Edge Function + pg_cron já fazem esse papel.
+ */
+export async function recoverLocalJobs(): Promise<void> {
+  if (edgeFunctionUrl()) return;
+
+  const tables: Array<{ table: string; jobType: WorkerJobType }> = [
+    { table: "analysis_jobs", jobType: "analysis" },
+    { table: "prd_jobs", jobType: "prd" },
+    { table: "scope_jobs", jobType: "scope" },
+  ];
+
+  try {
+    const admin = getSupabaseAdmin();
+    for (const { table, jobType } of tables) {
+      const { data } = await admin
+        .from(table)
+        .select("project_id")
+        .eq("status", "running");
+
+      const projectIds = Array.from(
+        new Set((data ?? []).map((row) => row.project_id as string))
+      );
+      for (const projectId of projectIds) {
+        console.log(`[worker] Retomando job ${jobType} do projeto ${projectId} após restart.`);
+        scheduleWorker(projectId, jobType);
+      }
+    }
+  } catch (error) {
+    console.error("[worker] Falha ao recuperar jobs locais:", error);
+  }
 }

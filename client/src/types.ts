@@ -182,6 +182,68 @@ export interface SpecDoc {
   qa_validation?: { complete: boolean; issues: string[] };
 }
 
+// --- Escopo (calculadora de horas) ------------------------------------------
+
+export type ScopePlatform = "web" | "mobile_native" | "mobile_responsive";
+export type ScopeComplexity = "simples" | "media" | "dificil";
+export type ScopeConfidence = "low" | "medium" | "high";
+export type ScopeSalesModel = "fechado" | "banco_horas";
+
+export interface FeatureHours {
+  product: number;
+  development: number;
+  qa: number;
+  total: number;
+}
+
+export interface ScopeConfig {
+  hourly_rate: number;
+  platform_multipliers: Record<ScopePlatform, number>;
+  buffers: { qa: number; product: number };
+  complexity_ranges: Record<ScopeComplexity, number>;
+  phases: string[];
+}
+
+export interface ScopeFeature {
+  id: string;
+  title: string;
+  description: string;
+  platforms: ScopePlatform[];
+  phase: string;
+  complexity: ScopeComplexity;
+  lowcode_factor: number;
+  origin_frames: string[];
+  confidence: ScopeConfidence;
+  is_active: boolean;
+  hours: FeatureHours;
+}
+
+export interface ScopeModule {
+  id: string;
+  name: string;
+  category: string;
+  description_client: string;
+  is_mandatory: boolean;
+  mandatory_reason: string;
+  features: ScopeFeature[];
+}
+
+export interface ScopeData {
+  modules: ScopeModule[];
+  generated_at?: string;
+  sales_model?: ScopeSalesModel;
+  risk_margin?: number;
+}
+
+export interface ScopeJob {
+  id: string;
+  status: "pending" | "running" | "done" | "error";
+  total_steps: number;
+  processed_steps: number;
+  current_step_label: string | null;
+  error: string | null;
+}
+
 export interface AnalysisSourceMetadata {
   discovery?: SourceMetadata | null;
   prototype?: SourceMetadata | null;

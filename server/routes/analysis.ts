@@ -2,7 +2,11 @@ import { Router } from "express";
 import { pickActor, resolveActors } from "../actors";
 import { AnthropicError } from "../anthropic-client";
 import { readGaps, runAnalysisStep } from "../analysis-runner";
-import { scheduleAnalysisWorker, schedulePrdWorker } from "../analysis-worker-client";
+import {
+  scheduleAnalysisWorker,
+  schedulePrdWorker,
+  scheduleScopeWorker,
+} from "../analysis-worker-client";
 import type { AuthedRequest } from "../auth";
 import {
   assembleDesignSystem,
@@ -31,6 +35,13 @@ import {
   validateQaTestCasesDoc,
   type QaGenParams,
 } from "../qa-service";
+import {
+  getScopeConfig,
+  loadScope,
+  planScopeSteps,
+  saveScope,
+  type ScopeData,
+} from "../scope-service";
 import {
   SPEC_DOCS,
   type SpecDocGroup,
@@ -696,6 +707,157 @@ analysisRouter.get("/:id/prd/status", async (req: AuthedRequest, res) => {
     error: job.error,
     prd,
   });
+});
+
+// --- Escopo (calculadora de horas) ------------------------------------------
+
+// Inicia geração de escopo no backend (worker). O frontend só acompanha.
+analysisRouter.post("/:id/scope/start", async (req: AuthedRequest, res) => {
+  const project = await loadProjectForUser(req, req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Projeto não encontrado." });
+    return;
+  }
+
+  const admin = getSupabaseAdmin();
+  const { discovery } = await getSourceTexts(project.id);
+
+  if (!discovery.trim()) {
+    res.status(400).json({ error: "O Discovery deste projeto está vazio." });
+    return;
+  }
+
+  const { data: runningJob } = await admin
+    .from("scope_jobs")
+    .select("*")
+    .eq("project_id", project.id)
+    .eq("status", "running")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (runningJob) {
+    scheduleScopeWorker(project.id);
+    res.status(200).json({
+      jobId: runningJob.id,
+      status: "running",
+      total: runningJob.total_steps,
+      processed: runningJob.processed_steps,
+      currentStepLabel: runningJob.current_step_label,
+      resumed: true,
+    });
+    return;
+  }
+
+  const body = (req.body ?? {}) as {
+    sales_model?: string;
+    risk_margin?: number;
+  };
+  const salesModel = body.sales_model === "banco_horas" ? "banco_horas" : "fechado";
+  const riskMargin = Math.min(1, Math.max(0, Number(body.risk_margin) || 0));
+
+  const steps = planScopeSteps(discovery);
+  const currentStep = steps[0];
+
+  const { data: job, error: jobError } = await admin
+    .from("scope_jobs")
+    .insert({
+      project_id: project.id,
+      status: "running",
+      total_steps: steps.length,
+      processed_steps: 0,
+      current_step_label: currentStep?.label ?? null,
+      payload: { sales_model: salesModel, risk_margin: riskMargin },
+      created_by: req.authUser?.id ?? null,
+    })
+    .select("*")
+    .single();
+
+  if (jobError || !job) {
+    res.status(500).json({ error: "Erro ao iniciar a geração do escopo." });
+    return;
+  }
+
+  scheduleScopeWorker(project.id);
+
+  res.status(201).json({
+    jobId: job.id,
+    status: "running",
+    total: steps.length,
+    processed: 0,
+    currentStepLabel: currentStep?.label ?? null,
+  });
+});
+
+analysisRouter.get("/:id/scope/status", async (req: AuthedRequest, res) => {
+  const project = await loadProjectForUser(req, req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Projeto não encontrado." });
+    return;
+  }
+
+  const admin = getSupabaseAdmin();
+  const { data: job } = await admin
+    .from("scope_jobs")
+    .select("*")
+    .eq("project_id", project.id)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (!job) {
+    res.json({ status: "idle" as const });
+    return;
+  }
+
+  let scope: ScopeData | null = null;
+  if (job.status === "done") {
+    scope = await loadScope(project.id);
+  }
+
+  res.json({
+    jobId: job.id,
+    status: job.status,
+    total: job.total_steps,
+    processed: job.processed_steps,
+    currentStepLabel: job.current_step_label,
+    error: job.error,
+    scope,
+  });
+});
+
+// Escopo atual (editável) + configuração global de cálculo.
+analysisRouter.get("/:id/scope", async (req: AuthedRequest, res) => {
+  const project = await loadProjectForUser(req, req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Projeto não encontrado." });
+    return;
+  }
+
+  const [scope, config] = await Promise.all([
+    loadScope(project.id),
+    getScopeConfig(),
+  ]);
+
+  res.json({ scope, config });
+});
+
+// Salva edições manuais do escopo (auto-save debounced do frontend).
+analysisRouter.patch("/:id/scope", async (req: AuthedRequest, res) => {
+  const project = await loadProjectForUser(req, req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Projeto não encontrado." });
+    return;
+  }
+
+  const body = req.body as { scope?: ScopeData };
+  if (!body?.scope || !Array.isArray(body.scope.modules)) {
+    res.status(400).json({ error: "Escopo inválido." });
+    return;
+  }
+
+  await saveScope(project.id, body.scope);
+  res.json({ ok: true });
 });
 
 // Gera (e persiste) o PRD em múltiplos passos.
