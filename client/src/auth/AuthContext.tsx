@@ -19,6 +19,7 @@ interface AuthState {
   loading: boolean;
   signIn: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
+  reloadProfile: () => Promise<void>;
   isAdmin: boolean;
 }
 
@@ -88,6 +89,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setEmail(null);
   }, []);
 
+  const reloadProfile = useCallback(
+    () => loadProfile(session),
+    [loadProfile, session]
+  );
+
   const value = useMemo<AuthState>(
     () => ({
       session,
@@ -96,10 +102,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       loading,
       signIn,
       signOut,
+      reloadProfile,
       isAdmin:
         profile?.role === "super_admin" || profile?.role === "team_admin",
     }),
-    [session, profile, email, loading, signIn, signOut]
+    [session, profile, email, loading, signIn, signOut, reloadProfile]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

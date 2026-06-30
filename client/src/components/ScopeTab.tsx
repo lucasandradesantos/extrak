@@ -110,11 +110,13 @@ export function ScopeTab({ projectId, projectName, hasDiscovery }: ScopeTabProps
 
   const load = useCallback(async () => {
     setLoading(true);
+    let loadedScope: ScopeData | null = null;
     try {
       const data = await apiFetch<{ scope: ScopeData | null; config: ScopeConfig }>(
         `/api/projects/${projectId}/scope`,
         { fallback: "Erro ao carregar o escopo." }
       );
+      loadedScope = data.scope;
       setScope(data.scope);
       setConfig(data.config);
       if (data.scope?.sales_model) setSalesModel(data.scope.sales_model);
@@ -135,6 +137,7 @@ export function ScopeTab({ projectId, projectName, hasDiscovery }: ScopeTabProps
         total?: number;
         processed?: number;
         currentStepLabel?: string | null;
+        error?: string | null;
       }>(`/api/projects/${projectId}/scope/status`, {
         fallback: "Erro ao verificar a geração do escopo.",
       });
@@ -145,6 +148,13 @@ export function ScopeTab({ projectId, projectName, hasDiscovery }: ScopeTabProps
           label: status.currentStepLabel ?? "Gerando…",
         });
         setGenerating(true);
+      } else if (status.status === "error" && !loadedScope) {
+        // Última geração falhou e não há escopo salvo — mostra o motivo em vez
+        // de uma tela vazia silenciosa (ex.: créditos da IA, falha de gravação).
+        setError(
+          humanizeApiError(status.error ?? "A última geração de escopo falhou.") +
+            ' — clique em "Gerar escopo" para tentar de novo.'
+        );
       }
     } catch {
       // Sem job em andamento ou falha pontual — ignora.

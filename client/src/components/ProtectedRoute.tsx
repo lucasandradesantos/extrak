@@ -1,5 +1,5 @@
-import { Spin, Typography } from "antd";
-import type { ReactNode } from "react";
+import { Button, Space, Spin, Typography } from "antd";
+import { useState, type ReactNode } from "react";
 import { Navigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 
@@ -12,7 +12,8 @@ export function ProtectedRoute({
   children: ReactNode;
   requireAdmin?: boolean;
 }) {
-  const { session, profile, loading, isAdmin } = useAuth();
+  const { session, profile, loading, isAdmin, reloadProfile, signOut } = useAuth();
+  const [retrying, setRetrying] = useState(false);
 
   if (loading) {
     return (
@@ -29,9 +30,29 @@ export function ProtectedRoute({
   if (!profile) {
     return (
       <div style={{ display: "grid", placeItems: "center", minHeight: "60vh", padding: 24 }}>
-        <Text type="secondary">
-          Seu usuário não tem um perfil configurado. Contate o administrador.
-        </Text>
+        <Space direction="vertical" align="center" size={16}>
+          <Text type="secondary" style={{ textAlign: "center" }}>
+            Não foi possível carregar seu perfil. Pode ser uma falha de conexão
+            temporária — tente novamente. Se persistir, contate o administrador.
+          </Text>
+          <Space>
+            <Button
+              type="primary"
+              loading={retrying}
+              onClick={async () => {
+                setRetrying(true);
+                try {
+                  await reloadProfile();
+                } finally {
+                  setRetrying(false);
+                }
+              }}
+            >
+              Tentar novamente
+            </Button>
+            <Button onClick={() => signOut()}>Sair</Button>
+          </Space>
+        </Space>
       </div>
     );
   }

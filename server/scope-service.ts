@@ -347,6 +347,8 @@ export async function loadScopeDraft(projectId: string): Promise<ScopeModule[]> 
     .select("content_md")
     .eq("project_id", projectId)
     .eq("kind", "scope_draft")
+    .order("version", { ascending: false })
+    .limit(1)
     .maybeSingle();
 
   if (!data?.content_md) return [];
@@ -358,20 +360,52 @@ export async function loadScopeDraft(projectId: string): Promise<ScopeModule[]> 
   }
 }
 
+/**
+ * Upsert manual de um project_docs por (project_id, kind). NÃO usa
+ * onConflict — project_docs não tem constraint única em (project_id, kind)
+ * (usa versionamento), então onConflict falha com 42P10. Aqui fazemos
+ * select → update/insert e CHECAMOS o erro (lança em falha), para que uma
+ * falha de gravação vire erro do job em vez de um "done" silencioso.
+ */
+async function upsertProjectDoc(
+  projectId: string,
+  kind: string,
+  contentMd: string
+): Promise<void> {
+  const admin = getSupabaseAdmin();
+  const { data: existing, error: selError } = await admin
+    .from("project_docs")
+    .select("id")
+    .eq("project_id", projectId)
+    .eq("kind", kind)
+    .order("version", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (selError) {
+    throw new Error(`Falha ao ler ${kind}: ${selError.message}`);
+  }
+
+  if (existing?.id) {
+    const { error } = await admin
+      .from("project_docs")
+      .update({ content_md: contentMd, updated_at: new Date().toISOString() })
+      .eq("id", existing.id);
+    if (error) throw new Error(`Falha ao atualizar ${kind}: ${error.message}`);
+    return;
+  }
+
+  const { error } = await admin
+    .from("project_docs")
+    .insert({ project_id: projectId, kind, content_md: contentMd, version: 1 });
+  if (error) throw new Error(`Falha ao inserir ${kind}: ${error.message}`);
+}
+
 export async function saveScopeDraft(
   projectId: string,
   modules: ScopeModule[]
 ): Promise<void> {
-  const admin = getSupabaseAdmin();
-  await admin.from("project_docs").upsert(
-    {
-      project_id: projectId,
-      kind: "scope_draft",
-      content_md: JSON.stringify(modules),
-      version: 1,
-    },
-    { onConflict: "project_id,kind" }
-  );
+  await upsertProjectDoc(projectId, "scope_draft", JSON.stringify(modules));
 }
 
 export async function clearScopeDraft(projectId: string): Promise<void> {
@@ -390,6 +424,8 @@ export async function loadScope(projectId: string): Promise<ScopeData | null> {
     .select("content_md")
     .eq("project_id", projectId)
     .eq("kind", "scope")
+    .order("version", { ascending: false })
+    .limit(1)
     .maybeSingle();
 
   if (!data?.content_md) return null;
@@ -401,16 +437,7 @@ export async function loadScope(projectId: string): Promise<ScopeData | null> {
 }
 
 export async function saveScope(projectId: string, scope: ScopeData): Promise<void> {
-  const admin = getSupabaseAdmin();
-  await admin.from("project_docs").upsert(
-    {
-      project_id: projectId,
-      kind: "scope",
-      content_md: JSON.stringify(scope),
-      version: 1,
-    },
-    { onConflict: "project_id,kind" }
-  );
+  await upsertProjectDoc(projectId, "scope", JSON.stringify(scope));
 }
 
 // --- Geração de um passo (chunk) ---------------------------------------------
