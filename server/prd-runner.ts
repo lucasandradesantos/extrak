@@ -10,6 +10,7 @@ import {
   type PrdGenParams,
 } from "./prd-service";
 import { getSupabaseAdmin } from "./supabase";
+import { runWithUsageContext } from "./usage-context";
 
 const STEP_LOCK_MS = 90_000;
 
@@ -228,7 +229,10 @@ export async function runPrdStep(
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       try {
-        const result = await generatePrdStep(params, step.id, sections);
+        const result = await runWithUsageContext(
+          { projectId, feature: "prd", userId: job.created_by },
+          () => generatePrdStep(params, step.id, sections)
+        );
         content = result.content;
         lastError = null;
         break;

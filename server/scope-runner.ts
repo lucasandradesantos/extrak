@@ -13,12 +13,9 @@ import {
   type ScopeSalesModel,
 } from "./scope-service";
 import { getSupabaseAdmin } from "./supabase";
+import { runWithUsageContext } from "./usage-context";
 
 const STEP_LOCK_MS = 90_000;
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 export interface ScopeStepRunResult {
   status: "running" | "done" | "error";
@@ -214,23 +211,12 @@ export async function runScopeStep(
       return { status: "done", processed: idx + 1, total: totalSteps };
     }
 
-    let modules: ReturnType<typeof assembleScope>["modules"] | null = null;
-    let lastError: Error | null = null;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        modules = await generateScopeStep(params, step.id, draft, config);
-        lastError = null;
-        break;
-      } catch (err) {
-        lastError = err instanceof Error ? err : new Error(String(err));
-        if (attempt < 1) await sleep(2000);
-      }
-    }
-
-    if (lastError || modules == null) {
-      throw lastError ?? new Error("Falha ao mapear módulos do escopo.");
-    }
-
+    // Sem retry: tool-use torna a saída confiável, e re-tentar uma falha
+    // (créditos, rate limit) só queima mais créditos sem resolver.
+    const modules = await runWithUsageContext(
+      { projectId, feature: "scope", userId: job.created_by },
+      () => generateScopeStep(params, step.id, draft, config)
+    );
     draft = [...draft, ...modules];
     await saveScopeDraft(projectId, draft);
 

@@ -4,10 +4,12 @@ import {
   Card,
   Empty,
   Form,
+  Flex,
   Input,
   InputNumber,
   Select,
   Space,
+  Statistic,
   Table,
   Tag,
   Typography,
@@ -26,6 +28,24 @@ interface AnthropicKeyStatus {
   masked: string | null;
 }
 
+interface ProjectUsage {
+  project_id: string;
+  name: string;
+  input_tokens: number;
+  output_tokens: number;
+  cost_usd: number;
+  calls: number;
+}
+
+interface UsageResponse {
+  totals: { input_tokens: number; output_tokens: number; cost_usd: number; calls: number };
+  byProject: ProjectUsage[];
+}
+
+const fmtNum = (n: number) => n.toLocaleString("pt-BR");
+const fmtUsd = (n: number) =>
+  `US$ ${n.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
 export function AdminPage() {
   const { profile } = useAuth();
   const isSuper = profile?.role === "super_admin";
@@ -42,6 +62,8 @@ export function AdminPage() {
   const [savingKey, setSavingKey] = useState(false);
 
   const [savingScopeConfig, setSavingScopeConfig] = useState(false);
+
+  const [usage, setUsage] = useState<UsageResponse | null>(null);
 
   const [teamForm] = Form.useForm();
   const [userForm] = Form.useForm();
@@ -95,8 +117,20 @@ export function AdminPage() {
     }
   }
 
+  async function loadUsage() {
+    try {
+      const res = await apiFetch<UsageResponse>("/api/admin/usage", {
+        fallback: "Erro ao carregar o consumo.",
+      });
+      setUsage(res);
+    } catch {
+      setUsage(null);
+    }
+  }
+
   useEffect(() => {
     loadAll();
+    loadUsage();
     if (isSuper) {
       loadKeyStatus();
       loadScopeConfig();
@@ -255,6 +289,58 @@ export function AdminPage() {
     <Space direction="vertical" size="large" style={{ width: "100%" }}>
       {error && <Alert type="error" message={error} showIcon closable onClose={() => setError(null)} />}
       {feedback && <Alert type="success" message={feedback} showIcon />}
+
+      <Card>
+        <Title level={4} style={{ marginTop: 0 }}>
+          Consumo de IA
+        </Title>
+        <Paragraph type="secondary" style={{ fontSize: 13 }}>
+          Tokens consumidos por projeto. O custo é uma <strong>estimativa</strong> (tokens ×
+          preço do modelo) — confira o valor real no faturamento da Anthropic.
+        </Paragraph>
+
+        {usage && usage.totals.calls > 0 ? (
+          <>
+            <Flex gap={32} wrap="wrap" style={{ marginBottom: 20 }}>
+              <Statistic title="Custo estimado total" value={fmtUsd(usage.totals.cost_usd)} />
+              <Statistic title="Tokens de entrada" value={fmtNum(usage.totals.input_tokens)} />
+              <Statistic title="Tokens de saída" value={fmtNum(usage.totals.output_tokens)} />
+              <Statistic title="Chamadas à IA" value={usage.totals.calls} />
+            </Flex>
+
+            <Table<ProjectUsage>
+              rowKey="project_id"
+              size="small"
+              pagination={false}
+              dataSource={usage.byProject}
+              columns={[
+                { title: "Projeto", dataIndex: "name" },
+                { title: "Chamadas", dataIndex: "calls", align: "right" },
+                {
+                  title: "Tokens entrada",
+                  dataIndex: "input_tokens",
+                  align: "right",
+                  render: (v: number) => fmtNum(v),
+                },
+                {
+                  title: "Tokens saída",
+                  dataIndex: "output_tokens",
+                  align: "right",
+                  render: (v: number) => fmtNum(v),
+                },
+                {
+                  title: "Custo estimado",
+                  dataIndex: "cost_usd",
+                  align: "right",
+                  render: (v: number) => <strong>{fmtUsd(v)}</strong>,
+                },
+              ]}
+            />
+          </>
+        ) : (
+          <Empty description="Nenhum consumo de IA registrado ainda." />
+        )}
+      </Card>
 
       {isSuper && (
         <Card>

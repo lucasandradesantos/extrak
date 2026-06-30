@@ -1,14 +1,20 @@
 import { randomUUID } from "node:crypto";
-import { completeJson } from "./anthropic-client";
+import { AnthropicError, completeJson } from "./anthropic-client";
 import { SCOPE_SYSTEM, buildScopeChunkPrompt } from "./prompts";
 import { chunkDiscovery, MAX_FULL_DISCOVERY_CHARS, truncate } from "./analysis-service";
 import { getSetting, setSetting } from "./settings";
 import { getSupabaseAdmin } from "./supabase";
 
-const SCOPE_STEP_DEADLINE_MS = 52_000;
-const SCOPE_MAX_TOKENS = 6_144;
-/** Chunks enxutos → cada passo de mapeamento termina antes do timeout serverless. */
-const SCOPE_CHUNK_CHARS = 10_000;
+// Streaming com deadline: ao estourar o tempo, a saída PARCIAL é aproveitada
+// (o parser recupera os módulos já gerados) e o passo conclui — em vez de
+// perder a chamada inteira num timeout (o que só queimava créditos).
+const SCOPE_STEP_DEADLINE_MS = 50_000;
+const SCOPE_MAX_TOKENS = 5_000;
+/**
+ * Chunks médios → menos chamadas que 10k (mais barato) sem inflar demais a
+ * saída por chamada (o que causava truncamento/lentidão).
+ */
+const SCOPE_CHUNK_CHARS = 25_000;
 
 export const SCOPE_CONFIG_SETTING = "scope_config";
 
@@ -448,6 +454,7 @@ export interface ScopeGenParams {
   salesModel?: ScopeSalesModel;
 }
 
+
 /** Gera os módulos de UM chunk do Discovery via IA. */
 export async function generateScopeStep(
   params: ScopeGenParams,
@@ -474,12 +481,24 @@ export async function generateScopeStep(
     previousModuleNames: Array.from(new Set(accumulated.map((m) => m.name))),
   });
 
-  const raw = await completeJson<unknown>({
-    system: SCOPE_SYSTEM,
-    prompt,
-    maxTokens: SCOPE_MAX_TOKENS,
-    deadlineMs: SCOPE_STEP_DEADLINE_MS,
-  });
+  let raw: unknown = [];
+  try {
+    raw = await completeJson<unknown>({
+      system: SCOPE_SYSTEM,
+      prompt,
+      maxTokens: SCOPE_MAX_TOKENS,
+      deadlineMs: SCOPE_STEP_DEADLINE_MS,
+    });
+  } catch (err) {
+    // Erros de conta (créditos/auth/rate limit) devem falhar o job claramente.
+    // Só um JSON irrecuperável (code "generic") é tolerado: segue sem módulos
+    // deste trecho, em vez de perder a geração inteira.
+    if (err instanceof AnthropicError && err.code !== "generic") throw err;
+    console.warn(
+      `[scope] trecho ${stepId} sem JSON utilizável; seguindo sem módulos deste trecho.`
+    );
+    raw = [];
+  }
 
   return normalizeScopeModules(raw, config);
 }

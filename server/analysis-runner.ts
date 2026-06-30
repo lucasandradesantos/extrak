@@ -8,6 +8,7 @@ import {
 import { type GapRow, gapToRow, mapGapRow } from "./project-access";
 import { getSupabaseAdmin } from "./supabase";
 import { Gap } from "./types";
+import { runWithUsageContext } from "./usage-context";
 
 // Janela em que consideramos um passo "em voo": se outro worker reivindicou o
 // passo há menos disso, evitamos processar em duplicidade.
@@ -180,21 +181,29 @@ export async function runAnalysisStep(
       const prevCompare = (payload.previous_gaps ?? []).filter(
         (g) => g.source === "comparacao"
       );
-      gaps = await compareDiscoveryPrototype({
-        discovery,
-        prototype: prototype as string,
-        previousGaps: prevCompare,
-        respostas,
-      });
+      gaps = await runWithUsageContext(
+        { projectId, feature: "analysis", userId: job.created_by },
+        () =>
+          compareDiscoveryPrototype({
+            discovery,
+            prototype: prototype as string,
+            previousGaps: prevCompare,
+            respostas,
+          })
+      );
     } else {
       const prevDiscovery = (payload.previous_gaps ?? []).filter(
         (g) => g.source !== "comparacao"
       );
-      gaps = await critiqueDiscoveryChunk({
-        discoveryChunk: chunks[idx],
-        previousGaps: prevDiscovery,
-        respostas,
-      });
+      gaps = await runWithUsageContext(
+        { projectId, feature: "analysis", userId: job.created_by },
+        () =>
+          critiqueDiscoveryChunk({
+            discoveryChunk: chunks[idx],
+            previousGaps: prevDiscovery,
+            respostas,
+          })
+      );
     }
 
     if (gaps.length > 0) {

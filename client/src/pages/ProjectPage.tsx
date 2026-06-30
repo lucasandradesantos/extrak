@@ -23,6 +23,7 @@ import { GapCard } from "../components/GapCard";
 import { ProjectFormModal, type ProjectFormValues } from "../components/ProjectFormModal";
 import { ScopeTab } from "../components/ScopeTab";
 import { SourceViewPanel } from "../components/SourceViewPanel";
+import { UsageTab } from "../components/UsageTab";
 import { apiFetch } from "../lib/api";
 import { downloadDocsAsZip, downloadText, sanitizeFilename } from "../lib/download";
 import { humanizeApiError } from "../lib/humanizeApiError";
@@ -55,7 +56,8 @@ type Tab =
   | "escopo"
   | "specs"
   | "qa"
-  | "historico";
+  | "historico"
+  | "custos";
 
 function formatDateTime(iso: string): string {
   return new Date(iso).toLocaleString("pt-BR", {
@@ -1022,6 +1024,7 @@ export function ProjectPage() {
     { key: "specs", label: "Specs" },
     { key: "qa", label: "QA" },
     { key: "historico", label: "Histórico" },
+    { key: "custos", label: "Custos" },
   ];
 
   return (
@@ -1322,6 +1325,8 @@ export function ProjectPage() {
           hasDiscovery={Boolean(discoverySource?.discovery_text?.trim())}
         />
       )}
+
+      {tab === "custos" && <UsageTab projectId={detail.project.id} />}
 
       {tab === "specs" && (
         <Card>

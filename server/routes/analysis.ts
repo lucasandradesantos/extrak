@@ -36,6 +36,7 @@ import {
   type QaGenParams,
 } from "../qa-service";
 import {
+  clearScopeDraft,
   getScopeConfig,
   loadScope,
   planScopeSteps,
@@ -58,6 +59,7 @@ import {
 } from "../project-access";
 import { getSupabaseAdmin } from "../supabase";
 import { FigmaApiError, Gap } from "../types";
+import { runWithUsageContext } from "../usage-context";
 
 export const analysisRouter = Router();
 
@@ -756,6 +758,10 @@ analysisRouter.post("/:id/scope/start", async (req: AuthedRequest, res) => {
   const salesModel = body.sales_model === "banco_horas" ? "banco_horas" : "fechado";
   const riskMargin = Math.min(1, Math.max(0, Number(body.risk_margin) || 0));
 
+  // Geração nova começa limpa: descarta rascunho de uma tentativa anterior para
+  // não reprocessar/duplicar módulos (e não pagar de novo pelos chunks já feitos).
+  await clearScopeDraft(project.id);
+
   const steps = planScopeSteps(discovery);
   const currentStep = steps[0];
 
@@ -860,6 +866,54 @@ analysisRouter.patch("/:id/scope", async (req: AuthedRequest, res) => {
   res.json({ ok: true });
 });
 
+// Consumo de tokens/créditos do projeto, agregado por feature.
+analysisRouter.get("/:id/usage", async (req: AuthedRequest, res) => {
+  const project = await loadProjectForUser(req, req.params.id);
+  if (!project) {
+    res.status(404).json({ error: "Projeto não encontrado." });
+    return;
+  }
+
+  const admin = getSupabaseAdmin();
+  const { data } = await admin
+    .from("token_usage")
+    .select("feature, input_tokens, output_tokens, cost_usd")
+    .eq("project_id", project.id);
+
+  const byFeature = new Map<
+    string,
+    { feature: string; input_tokens: number; output_tokens: number; cost_usd: number; calls: number }
+  >();
+  const totals = { input_tokens: 0, output_tokens: 0, cost_usd: 0, calls: 0 };
+
+  for (const row of data ?? []) {
+    const input = row.input_tokens ?? 0;
+    const output = row.output_tokens ?? 0;
+    const cost = Number(row.cost_usd ?? 0);
+    totals.input_tokens += input;
+    totals.output_tokens += output;
+    totals.cost_usd += cost;
+    totals.calls += 1;
+
+    const key = row.feature ?? "outros";
+    const agg =
+      byFeature.get(key) ??
+      { feature: key, input_tokens: 0, output_tokens: 0, cost_usd: 0, calls: 0 };
+    agg.input_tokens += input;
+    agg.output_tokens += output;
+    agg.cost_usd += cost;
+    agg.calls += 1;
+    byFeature.set(key, agg);
+  }
+
+  totals.cost_usd = Number(totals.cost_usd.toFixed(4));
+  const features = Array.from(byFeature.values())
+    .map((f) => ({ ...f, cost_usd: Number(f.cost_usd.toFixed(4)) }))
+    .sort((a, b) => b.cost_usd - a.cost_usd);
+
+  res.json({ totals, byFeature: features });
+});
+
 // Gera (e persiste) o PRD em múltiplos passos.
 analysisRouter.get("/:id/prd/plan", async (req: AuthedRequest, res) => {
   const project = await loadProjectForUser(req, req.params.id);
@@ -945,7 +999,10 @@ analysisRouter.post("/:id/prd/step", async (req: AuthedRequest, res) => {
       await clearPrdDraftSections(project.id);
     }
 
-    const result = await generatePrdStep(params, stepId, sections);
+    const result = await runWithUsageContext(
+      { projectId: project.id, feature: "prd", userId: req.authUser?.id },
+      () => generatePrdStep(params, stepId, sections)
+    );
 
     sections = { ...sections, [stepId]: result.content };
     await savePrdDraftSections(project.id, sections);
@@ -1185,7 +1242,10 @@ analysisRouter.post("/:id/docs/qa_test_cases/step", async (req: AuthedRequest, r
       productName: project.name,
     };
 
-    const result = await generateQaTestCasesStep(params, stepId, sections);
+    const result = await runWithUsageContext(
+      { projectId: project.id, feature: "qa", userId: req.authUser?.id },
+      () => generateQaTestCasesStep(params, stepId, sections)
+    );
 
     if (!result.done) {
       res.json(result);
@@ -1286,7 +1346,10 @@ analysisRouter.post("/:id/docs/design_system/step", async (req: AuthedRequest, r
       productName: project.name,
     };
 
-    const result = await generateDesignSystemStep(params, stepId, sections);
+    const result = await runWithUsageContext(
+      { projectId: project.id, feature: "spec", userId: req.authUser?.id },
+      () => generateDesignSystemStep(params, stepId, sections)
+    );
 
     if (!result.done) {
       res.json(result);
@@ -1378,15 +1441,19 @@ analysisRouter.post("/:id/docs/:kind", async (req: AuthedRequest, res) => {
     .maybeSingle();
 
   try {
-    const content = await generateSpecDoc({
-      kind,
-      discovery,
-      prototype,
-      gaps,
-      respostas,
-      prd: latestPrd?.content_md ?? null,
-      productName: project.name,
-    });
+    const content = await runWithUsageContext(
+      { projectId: project.id, feature: "spec", userId: req.authUser?.id },
+      () =>
+        generateSpecDoc({
+          kind,
+          discovery,
+          prototype,
+          gaps,
+          respostas,
+          prd: latestPrd?.content_md ?? null,
+          productName: project.name,
+        })
+    );
 
     const { data: last } = await admin
       .from("project_docs")

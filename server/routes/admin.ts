@@ -356,6 +356,72 @@ adminRouter.put(
   }
 );
 
+// Consumo de tokens/créditos por projeto (visão global). Super-admin vê tudo;
+// admin de time vê só os projetos do seu time.
+adminRouter.get("/usage", requireAdmin, async (req: AuthedRequest, res) => {
+  const admin = getSupabaseAdmin();
+  const isSuper = req.profile?.role === "super_admin";
+
+  // Sem checar erro com 500: se a tabela ainda não existir (migration pendente),
+  // tratamos como "sem consumo" em vez de quebrar a tela de Admin.
+  const { data } = await admin
+    .from("token_usage")
+    .select(
+      "project_id, input_tokens, output_tokens, cost_usd, projects(name, team_id)"
+    );
+
+  interface UsageRow {
+    project_id: string | null;
+    input_tokens: number | null;
+    output_tokens: number | null;
+    cost_usd: number | string | null;
+    projects: { name: string | null; team_id: string | null } | null;
+  }
+
+  const byProject = new Map<
+    string,
+    { project_id: string; name: string; input_tokens: number; output_tokens: number; cost_usd: number; calls: number }
+  >();
+  const totals = { input_tokens: 0, output_tokens: 0, cost_usd: 0, calls: 0 };
+
+  for (const row of (data ?? []) as unknown as UsageRow[]) {
+    const teamId = row.projects?.team_id ?? null;
+    if (!isSuper && teamId !== req.profile?.team_id) continue;
+
+    const input = row.input_tokens ?? 0;
+    const output = row.output_tokens ?? 0;
+    const cost = Number(row.cost_usd ?? 0);
+    totals.input_tokens += input;
+    totals.output_tokens += output;
+    totals.cost_usd += cost;
+    totals.calls += 1;
+
+    const key = row.project_id ?? "—";
+    const agg =
+      byProject.get(key) ??
+      {
+        project_id: key,
+        name: row.projects?.name ?? "(sem projeto)",
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usd: 0,
+        calls: 0,
+      };
+    agg.input_tokens += input;
+    agg.output_tokens += output;
+    agg.cost_usd += cost;
+    agg.calls += 1;
+    byProject.set(key, agg);
+  }
+
+  totals.cost_usd = Number(totals.cost_usd.toFixed(4));
+  const projects = Array.from(byProject.values())
+    .map((p) => ({ ...p, cost_usd: Number(p.cost_usd.toFixed(4)) }))
+    .sort((a, b) => b.cost_usd - a.cost_usd);
+
+  res.json({ totals, byProject: projects });
+});
+
 // ----- helper -----
 
 interface CreateUserInput {

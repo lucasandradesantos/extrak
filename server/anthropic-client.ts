@@ -1,7 +1,71 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { ANTHROPIC_KEY_SETTING, getSetting } from "./settings";
+import { getSupabaseAdmin } from "./supabase";
+import { getUsageContext } from "./usage-context";
 
 const DEFAULT_MODEL = "claude-sonnet-4-5-20250929";
+
+// Preço por 1M de tokens (USD). ESTIMATIVA — ajuste conforme o faturamento real
+// da Anthropic. Usado só para exibir custo aproximado; os tokens são a verdade.
+const PRICING: Record<
+  string,
+  { input: number; output: number; cacheWrite: number; cacheRead: number }
+> = {
+  "claude-opus": { input: 15, output: 75, cacheWrite: 18.75, cacheRead: 1.5 },
+  "claude-sonnet": { input: 3, output: 15, cacheWrite: 3.75, cacheRead: 0.3 },
+  "claude-haiku": { input: 0.8, output: 4, cacheWrite: 1, cacheRead: 0.08 },
+};
+const DEFAULT_PRICING = PRICING["claude-sonnet"];
+
+function priceFor(model: string) {
+  const key = Object.keys(PRICING).find((k) => model.includes(k));
+  return key ? PRICING[key] : DEFAULT_PRICING;
+}
+
+interface TokenUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_creation_input_tokens?: number | null;
+  cache_read_input_tokens?: number | null;
+}
+
+/**
+ * Registra o consumo de tokens da chamada no banco, atribuído ao projeto/feature
+ * do contexto atual. Best-effort: nunca lança nem bloqueia a geração.
+ */
+async function recordUsage(model: string, usage: TokenUsage | null | undefined): Promise<void> {
+  if (!usage) return;
+  const ctx = getUsageContext();
+  if (!ctx) return; // sem contexto (ex.: probe de créditos) → não registra
+
+  const input = usage.input_tokens ?? 0;
+  const output = usage.output_tokens ?? 0;
+  const cacheWrite = usage.cache_creation_input_tokens ?? 0;
+  const cacheRead = usage.cache_read_input_tokens ?? 0;
+  if (input === 0 && output === 0 && cacheWrite === 0 && cacheRead === 0) return;
+
+  const p = priceFor(model);
+  const cost =
+    (input * p.input + output * p.output + cacheWrite * p.cacheWrite + cacheRead * p.cacheRead) /
+    1_000_000;
+
+  try {
+    const admin = getSupabaseAdmin();
+    await admin.from("token_usage").insert({
+      project_id: ctx.projectId ?? null,
+      feature: ctx.feature,
+      model,
+      input_tokens: input,
+      output_tokens: output,
+      cache_creation_input_tokens: cacheWrite,
+      cache_read_input_tokens: cacheRead,
+      cost_usd: Number(cost.toFixed(6)),
+      created_by: ctx.userId ?? null,
+    });
+  } catch (err) {
+    console.error("[usage] falha ao registrar consumo de tokens:", err);
+  }
+}
 const CREDIT_PROBE_CACHE_MS = 5 * 60 * 1000;
 
 export type AnthropicErrorCode = "credits_low" | "auth" | "rate_limit" | "generic";
@@ -181,6 +245,7 @@ async function complete({
       : null;
 
   let text = "";
+  const usage: TokenUsage = {};
   try {
     // Streaming: mantém a conexão viva e permite abortar no deadline mantendo o
     // que já foi gerado (o parser recupera JSON parcial).
@@ -195,7 +260,13 @@ async function complete({
     );
 
     for await (const event of stream) {
-      if (
+      if (event.type === "message_start") {
+        usage.input_tokens = event.message.usage.input_tokens;
+        usage.cache_creation_input_tokens = event.message.usage.cache_creation_input_tokens;
+        usage.cache_read_input_tokens = event.message.usage.cache_read_input_tokens;
+      } else if (event.type === "message_delta") {
+        usage.output_tokens = event.usage.output_tokens;
+      } else if (
         event.type === "content_block_delta" &&
         event.delta.type === "text_delta"
       ) {
@@ -229,6 +300,8 @@ async function complete({
     }
   } finally {
     if (timer) clearTimeout(timer);
+    // Registra o consumo mesmo em abort/erro — os tokens já foram cobrados.
+    await recordUsage(getModel(), usage);
   }
 
   text = text.trim();
@@ -374,4 +447,92 @@ export async function completeJson<T = unknown>(
 ): Promise<T> {
   const raw = await complete(options);
   return extractJson(raw) as T;
+}
+
+interface ToolJsonOptions {
+  system: string;
+  prompt: string;
+  toolName: string;
+  toolDescription: string;
+  inputSchema: Record<string, unknown>;
+  maxTokens?: number;
+  deadlineMs?: number;
+}
+
+/**
+ * Saída estruturada via tool-use: força a IA a chamar uma ferramenta com um
+ * schema, devolvendo o `input` já como objeto JS — sem parsear texto livre
+ * (elimina o erro "não foi possível interpretar o JSON"). Não usa streaming;
+ * com saída limitada cabe bem no tempo da função.
+ */
+export async function completeJsonViaTool<T = unknown>(
+  options: ToolJsonOptions
+): Promise<T> {
+  const client = await getClient();
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer =
+    options.deadlineMs && options.deadlineMs > 0
+      ? setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, options.deadlineMs)
+      : null;
+
+  try {
+    const response = await client.messages.create(
+      {
+        model: getModel(),
+        max_tokens: options.maxTokens ?? 8000,
+        system: options.system,
+        messages: [{ role: "user", content: options.prompt }],
+        tools: [
+          {
+            name: options.toolName,
+            description: options.toolDescription,
+            input_schema: options.inputSchema as Anthropic.Tool.InputSchema,
+          },
+        ],
+        tool_choice: { type: "tool", name: options.toolName },
+      },
+      { signal: controller.signal }
+    );
+
+    await recordUsage(getModel(), response.usage);
+
+    const block = response.content.find((b) => b.type === "tool_use");
+    if (!block || block.type !== "tool_use") {
+      throw new AnthropicError("A IA não retornou a estrutura esperada.");
+    }
+    return block.input as T;
+  } catch (error) {
+    if (error instanceof AnthropicError) throw error;
+
+    if (
+      timedOut ||
+      (error instanceof Error &&
+        (error.name === "AbortError" ||
+          error.name === "APIUserAbortError" ||
+          /abort/i.test(error.message)))
+    ) {
+      throw new AnthropicError(
+        `A IA não respondeu dentro de ${options.deadlineMs}ms.`
+      );
+    }
+
+    if (error instanceof Anthropic.APIError) {
+      const { message, code } = humanizeAnthropicDetail(
+        error.status,
+        extractApiErrorDetail(error)
+      );
+      if (code === "credits_low") {
+        creditProbeCache = { at: Date.now(), ok: false, message };
+      }
+      throw new AnthropicError(message, code);
+    }
+
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }

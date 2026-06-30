@@ -210,7 +210,9 @@ Para CADA módulo, gere um objeto com EXATAMENTE estes campos:
   - "origin_frames": array de strings com os frames/telas/seções do Discovery que justificam a feature (obrigatório, não-vazio).
   - "confidence": "low" | "medium" | "high".
 
-RESPONDA APENAS com um array JSON de módulos, sem nenhum texto antes ou depois, sem comentários e sem cercas de código. Se o trecho não contiver módulos/features, responda [].`;
+Para economizar e caber no tempo: CONSOLIDE features relacionadas em vez de fragmentar. Gere no máximo ~6 features por módulo neste trecho, focando nas mais relevantes. Seja conciso (descrições de 1 frase).
+
+RESPONDA APENAS com um array JSON de módulos, sem nenhum texto antes ou depois, sem comentários e sem cercas de código. Comece direto com "[". Se o trecho não contiver módulos/features, responda [].`;
 
 export interface ScopeChunkPromptParams {
   discovery: string;
