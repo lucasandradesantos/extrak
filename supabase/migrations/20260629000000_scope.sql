@@ -32,6 +32,6 @@ create policy scope_jobs_access on public.scope_jobs
 insert into public.app_settings (key, value)
 values (
   'scope_config',
-  '{"hourly_rate":150,"platform_multipliers":{"web":1.0,"mobile_native":1.4,"mobile_responsive":1.1},"buffers":{"qa":0.15,"product":0.10},"complexity_ranges":{"simples":4,"media":10,"dificil":26},"phases":["MVP","V2","V3"]}'
+  '{"hourly_rate":150,"platform_multipliers":{"web":1.0,"mobile_native":1.4,"mobile_responsive":1.1},"buffers":{"qa":0.2,"product":0.10},"complexity_ranges":{"simples":2,"media":3,"dificil":6},"product_ranges":{"simples":0.5,"media":1,"dificil":1.5},"ai_factor":1,"phases":["MVP","V2","V3"]}'
 )
 on conflict (key) do nothing;

@@ -201,6 +201,10 @@ export interface ScopeConfig {
   platform_multipliers: Record<ScopePlatform, number>;
   buffers: { qa: number; product: number };
   complexity_ranges: Record<ScopeComplexity, number>;
+  /** Horas-base de Produto (discovery + design) por complexidade — disciplina própria. */
+  product_ranges: Record<ScopeComplexity, number>;
+  /** Fator de produtividade com IA (1 = tradicional; 0.4 = ~60% mais rápido). */
+  ai_factor: number;
   phases: string[];
 }
 

@@ -13,6 +13,7 @@ import {
   Progress,
   Select,
   Space,
+  Statistic,
   Switch,
   Table,
   Tag,
@@ -25,16 +26,15 @@ import { apiFetch } from "../lib/api";
 import { downloadText, sanitizeFilename } from "../lib/download";
 import { humanizeApiError } from "../lib/humanizeApiError";
 import {
-  PT_COMPLEXITY,
+  computeFeatureHours,
+  formatHm,
+  parseHm,
   PT_PLATFORM,
   PT_SALES_MODEL,
-  recomputeModule,
   scopeToMarkdown,
   summarizeScope,
-  withRecomputedHours,
 } from "../lib/scopeCalc";
 import type {
-  ScopeComplexity,
   ScopeConfig,
   ScopeData,
   ScopeFeature,
@@ -44,16 +44,6 @@ import type {
 } from "../types";
 
 const { Text, Paragraph } = Typography;
-
-const PLATFORM_OPTIONS = (Object.keys(PT_PLATFORM) as ScopePlatform[]).map((p) => ({
-  value: p,
-  label: PT_PLATFORM[p],
-}));
-
-const COMPLEXITY_OPTIONS = (Object.keys(PT_COMPLEXITY) as ScopeComplexity[]).map((c) => ({
-  value: c,
-  label: PT_COMPLEXITY[c],
-}));
 
 function newFeature(): ScopeFeature {
   return {
@@ -94,6 +84,9 @@ export function ScopeTab({ projectId, projectName, hasDiscovery }: ScopeTabProps
   const [config, setConfig] = useState<ScopeConfig | null>(null);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
+  // Janela entre clicar "Gerar" e o backend criar o job. O polling só começa
+  // depois (generating), evitando ler o job anterior (error) e reverter a tela.
+  const [starting, setStarting] = useState(false);
   const [progress, setProgress] = useState<{ current: number; total: number; label: string } | null>(
     null
   );
@@ -269,22 +262,38 @@ export function ScopeTab({ projectId, projectName, hasDiscovery }: ScopeTabProps
     });
   }
 
-  // Margem travada do escopo gerado — usada ao recalcular horas nas edições.
-  const editMargin = scope?.risk_margin ?? 0;
-
+  // Edita campos não-numéricos da feature (nome, fase, ativa) sem mexer nas horas.
   function updateFeature(
     moduleId: string,
     featureId: string,
     patch: Partial<ScopeFeature>
   ) {
-    if (!config) return;
     mutateModule(moduleId, (mod) => ({
       ...mod,
-      features: mod.features.map((f) =>
-        f.id === featureId
-          ? withRecomputedHours({ ...f, ...patch }, config, editMargin)
-          : f
-      ),
+      features: mod.features.map((f) => (f.id === featureId ? { ...f, ...patch } : f)),
+    }));
+  }
+
+  function round1(n: number): number {
+    return Math.round((Number.isFinite(n) ? n : 0) * 10) / 10;
+  }
+
+  // Edição direta das horas (Produto/Dev/QA). O Total é a soma; o Valor recalcula
+  // a partir do Total. Não depende mais de complexidade/low-code.
+  function updateFeatureHours(
+    moduleId: string,
+    featureId: string,
+    key: "product" | "development" | "qa",
+    value: number
+  ) {
+    mutateModule(moduleId, (mod) => ({
+      ...mod,
+      features: mod.features.map((f) => {
+        if (f.id !== featureId) return f;
+        const hours = { ...f.hours, [key]: round1(value) };
+        hours.total = round1(hours.product + hours.development + hours.qa);
+        return { ...f, hours };
+      }),
     }));
   }
 
@@ -296,10 +305,9 @@ export function ScopeTab({ projectId, projectName, hasDiscovery }: ScopeTabProps
   }
 
   function addFeature(moduleId: string) {
-    if (!config) return;
     mutateModule(moduleId, (mod) => ({
       ...mod,
-      features: [...mod.features, withRecomputedHours(newFeature(), config, editMargin)],
+      features: [...mod.features, newFeature()],
     }));
   }
 
@@ -313,10 +321,24 @@ export function ScopeTab({ projectId, projectName, hasDiscovery }: ScopeTabProps
   }
 
   function addModule() {
+    if (!scope) return;
+    applyScope({ ...scope, modules: [...scope.modules, newModule()] });
+  }
+
+  // Reaplica a régua (fator de IA, complexidade, margem) às horas do escopo
+  // atual, sem chamar a IA. Sobrescreve edições manuais de horas.
+  function recalcAllHours() {
     if (!scope || !config) return;
+    const margin = scope.risk_margin ?? 0;
     applyScope({
       ...scope,
-      modules: [...scope.modules, recomputeModule(newModule(), config, editMargin)],
+      modules: scope.modules.map((m) => ({
+        ...m,
+        features: m.features.map((f) => ({
+          ...f,
+          hours: computeFeatureHours(f, config, margin),
+        })),
+      })),
     });
   }
 
@@ -332,8 +354,8 @@ export function ScopeTab({ projectId, projectName, hasDiscovery }: ScopeTabProps
   async function handleGenerate() {
     setModalOpen(false);
     setError(null);
-    setGenerating(true);
     setProgress(null);
+    setStarting(true);
     try {
       const result = await apiFetch<{
         total: number;
@@ -349,21 +371,42 @@ export function ScopeTab({ projectId, projectName, hasDiscovery }: ScopeTabProps
         total: result.total,
         label: result.currentStepLabel ?? "Iniciando…",
       });
+      // Só agora ligamos o polling — o job já existe como "running".
+      setGenerating(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Erro ao gerar o escopo.");
-      setGenerating(false);
+    } finally {
+      setStarting(false);
     }
   }
 
   const summary = scope && config ? summarizeScope(scope, config) : null;
 
   function featureColumns(moduleId: string) {
+    const hourCell = (
+      f: ScopeFeature,
+      key: "product" | "development" | "qa"
+    ) => (
+      <InputNumber
+        size="small"
+        min={0}
+        step={0.25}
+        value={f.hours[key]}
+        disabled={!f.is_active}
+        style={{ width: "100%" }}
+        formatter={(v) => formatHm(typeof v === "number" ? v : Number(v) || 0)}
+        parser={(s) => parseHm(s ?? "")}
+        onChange={(v) =>
+          updateFeatureHours(moduleId, f.id, key, typeof v === "number" ? v : 0)
+        }
+      />
+    );
     return [
       {
-        title: "Feature",
+        title: "Módulo / Funcionalidade",
         dataIndex: "title",
         render: (_: unknown, f: ScopeFeature) => (
-          <Space direction="vertical" size={2} style={{ width: "100%" }}>
+          <Space direction="vertical" size={2} style={{ width: "100%", minWidth: 0 }}>
             <Input
               size="small"
               value={f.title}
@@ -373,8 +416,8 @@ export function ScopeTab({ projectId, projectName, hasDiscovery }: ScopeTabProps
             {f.origin_frames.length > 0 && (
               <Tooltip title={f.origin_frames.join(" · ")}>
                 <Text type="secondary" style={{ fontSize: 11 }}>
-                  origem: {f.origin_frames.slice(0, 2).join(", ")}
-                  {f.origin_frames.length > 2 ? "…" : ""}
+                  origem: {f.origin_frames.slice(0, 3).join(", ")}
+                  {f.origin_frames.length > 3 ? "…" : ""}
                 </Text>
               </Tooltip>
             )}
@@ -387,24 +430,22 @@ export function ScopeTab({ projectId, projectName, hasDiscovery }: ScopeTabProps
         ),
       },
       {
-        title: "Plataformas",
-        dataIndex: "platforms",
-        width: 200,
+        title: "Ativa",
+        dataIndex: "is_active",
+        width: 64,
+        align: "center" as const,
         render: (_: unknown, f: ScopeFeature) => (
-          <Select
+          <Switch
             size="small"
-            mode="multiple"
-            style={{ width: "100%" }}
-            value={f.platforms}
-            options={PLATFORM_OPTIONS}
-            onChange={(v) => updateFeature(moduleId, f.id, { platforms: v as ScopePlatform[] })}
+            checked={f.is_active}
+            onChange={(checked) => updateFeature(moduleId, f.id, { is_active: checked })}
           />
         ),
       },
       {
         title: "Fase",
         dataIndex: "phase",
-        width: 100,
+        width: 110,
         render: (_: unknown, f: ScopeFeature) => (
           <Select
             size="small"
@@ -416,64 +457,29 @@ export function ScopeTab({ projectId, projectName, hasDiscovery }: ScopeTabProps
         ),
       },
       {
-        title: "Complex.",
-        dataIndex: "complexity",
-        width: 110,
-        render: (_: unknown, f: ScopeFeature) => (
-          <Select
-            size="small"
-            style={{ width: "100%" }}
-            value={f.complexity}
-            options={COMPLEXITY_OPTIONS}
-            onChange={(v) => updateFeature(moduleId, f.id, { complexity: v as ScopeComplexity })}
-          />
-        ),
+        title: "Product",
+        dataIndex: "product",
+        width: 96,
+        render: (_: unknown, f: ScopeFeature) => hourCell(f, "product"),
       },
       {
-        title: "Low-code",
-        dataIndex: "lowcode_factor",
-        width: 90,
-        render: (_: unknown, f: ScopeFeature) => (
-          <InputNumber
-            size="small"
-            min={0.4}
-            max={1}
-            step={0.1}
-            value={f.lowcode_factor}
-            style={{ width: "100%" }}
-            onChange={(v) =>
-              updateFeature(moduleId, f.id, { lowcode_factor: typeof v === "number" ? v : 0.7 })
-            }
-          />
-        ),
+        title: "Dev",
+        dataIndex: "development",
+        width: 96,
+        render: (_: unknown, f: ScopeFeature) => hourCell(f, "development"),
       },
       {
-        title: "Horas (P/D/QA)",
-        dataIndex: "hours",
-        width: 120,
-        render: (_: unknown, f: ScopeFeature) => (
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            {f.hours.product}/{f.hours.development}/{f.hours.qa}
-          </Text>
-        ),
+        title: "QA",
+        dataIndex: "qa",
+        width: 96,
+        render: (_: unknown, f: ScopeFeature) => hourCell(f, "qa"),
       },
       {
         title: "Total",
         dataIndex: "total",
-        width: 70,
-        render: (_: unknown, f: ScopeFeature) => <Text strong>{f.hours.total}h</Text>,
-      },
-      {
-        title: "Ativa",
-        dataIndex: "is_active",
-        width: 70,
-        render: (_: unknown, f: ScopeFeature) => (
-          <Switch
-            size="small"
-            checked={f.is_active}
-            onChange={(checked) => updateFeature(moduleId, f.id, { is_active: checked })}
-          />
-        ),
+        width: 80,
+        align: "right" as const,
+        render: (_: unknown, f: ScopeFeature) => <Text strong>{formatHm(f.hours.total)}</Text>,
       },
       {
         title: "",
@@ -561,13 +567,22 @@ export function ScopeTab({ projectId, projectName, hasDiscovery }: ScopeTabProps
         <Button
           type="primary"
           onClick={openGenerateModal}
-          disabled={generating || !hasDiscovery}
-          loading={generating}
+          disabled={generating || starting || !hasDiscovery}
+          loading={generating || starting}
         >
           {scope ? "Gerar novamente" : "Gerar escopo"}
         </Button>
         {scope && config && (
           <>
+            <Popconfirm
+              title="Recalcular horas pela régua atual?"
+              description="Reaplica o fator de IA, complexidade e margem a todas as features. Sobrescreve edições manuais de horas."
+              onConfirm={() => recalcAllHours()}
+              okText="Recalcular"
+              cancelText="Cancelar"
+            >
+              <Button>Recalcular horas</Button>
+            </Popconfirm>
             <Button onClick={() => addModule()}>+ Módulo</Button>
             <Button
               onClick={async () => {
@@ -616,7 +631,7 @@ export function ScopeTab({ projectId, projectName, hasDiscovery }: ScopeTabProps
         <Empty description="Importe o Discovery deste projeto antes de gerar o escopo." />
       )}
 
-      {generating && progress && (
+      {(generating || starting) && progress && (
         <Alert
           type="info"
           showIcon
@@ -639,13 +654,72 @@ export function ScopeTab({ projectId, projectName, hasDiscovery }: ScopeTabProps
         />
       )}
 
-      {hasDiscovery && !scope && !generating && (
+      {hasDiscovery && !scope && !generating && !starting && (
         <Empty description='Clique em "Gerar escopo" para a IA mapear módulos e horas a partir do Discovery.' />
       )}
 
       {scope && config && summary && (
-        <Flex gap={16} wrap="wrap" align="flex-start">
-          <div style={{ flex: "1 1 560px", minWidth: 0 }}>
+        <>
+          <Card size="small" style={{ marginBottom: 16 }}>
+            <Flex wrap="wrap" gap={28} align="center">
+              <Statistic title="Total de horas" value={formatHm(summary.totalHours)} />
+              <div>
+                <Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 4 }}>
+                  Modelo / margem
+                </Text>
+                <Tag color={(scope.sales_model ?? "fechado") === "fechado" ? "red" : "blue"}>
+                  {PT_SALES_MODEL[scope.sales_model ?? "fechado"]}
+                </Tag>
+                <Tag>margem {Math.round((scope.risk_margin ?? 0) * 100)}%</Tag>
+              </div>
+              <div>
+                <Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 4 }}>
+                  Por disciplina
+                </Text>
+                <Tag>Produto {formatHm(summary.byDiscipline.product)}</Tag>
+                <Tag>Dev {formatHm(summary.byDiscipline.development)}</Tag>
+                <Tag>QA {formatHm(summary.byDiscipline.qa)}</Tag>
+              </div>
+              <div>
+                <Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 4 }}>
+                  Por fase
+                </Text>
+                {Object.entries(summary.byPhase).map(([phase, hours]) => (
+                  <Tag key={phase}>
+                    {phase} {formatHm(hours)}
+                  </Tag>
+                ))}
+              </div>
+              <div>
+                <Text type="secondary" style={{ fontSize: 12, display: "block", marginBottom: 4 }}>
+                  Por plataforma
+                </Text>
+                {(Object.keys(PT_PLATFORM) as ScopePlatform[])
+                  .filter((p) => summary.byPlatform[p] > 0)
+                  .map((p) => (
+                    <Tag key={p}>
+                      {PT_PLATFORM[p]} {formatHm(summary.byPlatform[p])}
+                    </Tag>
+                  ))}
+              </div>
+            </Flex>
+            {(summary.mandatoryModules > 0 || summary.lowConfidenceFeatures > 0) && (
+              <Flex gap={12} wrap="wrap" align="center" style={{ marginTop: 12 }}>
+                {summary.mandatoryModules > 0 && (
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {summary.mandatoryModules} módulo(s) obrigatório(s)
+                  </Text>
+                )}
+                {summary.lowConfidenceFeatures > 0 && (
+                  <Tag color="orange">
+                    {summary.lowConfidenceFeatures} feature(s) com baixa confiança — revise
+                  </Tag>
+                )}
+              </Flex>
+            )}
+          </Card>
+
+          <div style={{ width: "100%" }}>
             <Collapse
               defaultActiveKey={scope.modules.map((m) => m.id)}
               items={scope.modules.map((mod) => {
@@ -657,20 +731,32 @@ export function ScopeTab({ projectId, projectName, hasDiscovery }: ScopeTabProps
                   key: mod.id,
                   label: (
                     <Flex justify="space-between" align="center" gap={8} wrap="wrap">
-                      <Space>
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                          flex: 1,
+                          minWidth: 0,
+                        }}
+                      >
                         <Input
                           size="small"
                           value={mod.name}
                           variant="borderless"
-                          style={{ fontWeight: 600, width: 220 }}
+                          style={{ fontWeight: 600, flex: 1, minWidth: 0 }}
                           onClick={(e) => e.stopPropagation()}
                           onChange={(e) => updateModuleField(mod.id, { name: e.target.value })}
                         />
-                        {mod.is_mandatory && <Tag color="red">obrigatório</Tag>}
-                      </Space>
-                      <Space>
+                        {mod.is_mandatory && (
+                          <Tag color="red" style={{ flexShrink: 0 }}>
+                            obrigatório
+                          </Tag>
+                        )}
+                      </div>
+                      <Space style={{ flexShrink: 0 }}>
                         <Text type="secondary" style={{ fontSize: 12 }}>
-                          {Math.round(moduleHours * 10) / 10}h
+                          {formatHm(moduleHours)}
                         </Text>
                         <Tooltip title="Marcar módulo como obrigatório">
                           <Switch
@@ -707,6 +793,7 @@ export function ScopeTab({ projectId, projectName, hasDiscovery }: ScopeTabProps
                         rowKey="id"
                         size="small"
                         pagination={false}
+                        scroll={{ x: 720 }}
                         dataSource={mod.features}
                         columns={featureColumns(mod.id)}
                         locale={{ emptyText: "Sem features neste módulo." }}
@@ -726,94 +813,7 @@ export function ScopeTab({ projectId, projectName, hasDiscovery }: ScopeTabProps
               })}
             />
           </div>
-
-          <Card
-            size="small"
-            title="Resumo do escopo"
-            style={{ flex: "0 1 300px", position: "sticky", top: 16 }}
-          >
-            <Space direction="vertical" size={8} style={{ width: "100%" }}>
-              <div>
-                <Tag color={(scope.sales_model ?? "fechado") === "fechado" ? "red" : "blue"}>
-                  {PT_SALES_MODEL[scope.sales_model ?? "fechado"]}
-                </Tag>
-                <Tag>margem {Math.round((scope.risk_margin ?? 0) * 100)}%</Tag>
-              </div>
-              <div>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  Total de horas
-                </Text>
-                <div>
-                  <Text strong style={{ fontSize: 22 }}>
-                    {summary.totalHours}h
-                  </Text>
-                </div>
-              </div>
-              <div>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  Valor estimado (R$ {config.hourly_rate}/h)
-                </Text>
-                <div>
-                  <Text strong style={{ fontSize: 18 }}>
-                    R$ {summary.estimatedValue.toLocaleString("pt-BR")}
-                  </Text>
-                </div>
-              </div>
-
-              <div>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  Por disciplina
-                </Text>
-                <div>
-                  <Tag>Produto {summary.byDiscipline.product}h</Tag>
-                  <Tag>Dev {summary.byDiscipline.development}h</Tag>
-                  <Tag>QA {summary.byDiscipline.qa}h</Tag>
-                </div>
-              </div>
-
-              <div>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  Por fase
-                </Text>
-                <div>
-                  {Object.entries(summary.byPhase).map(([phase, hours]) => (
-                    <Tag key={phase}>
-                      {phase} {hours}h
-                    </Tag>
-                  ))}
-                </div>
-              </div>
-
-              <div>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  Por plataforma
-                </Text>
-                <div>
-                  {(Object.keys(PT_PLATFORM) as ScopePlatform[])
-                    .filter((p) => summary.byPlatform[p] > 0)
-                    .map((p) => (
-                      <Tag key={p}>
-                        {PT_PLATFORM[p]} {summary.byPlatform[p]}h
-                      </Tag>
-                    ))}
-                </div>
-              </div>
-
-              {summary.mandatoryModules > 0 && (
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  {summary.mandatoryModules} módulo(s) obrigatório(s)
-                </Text>
-              )}
-              {summary.lowConfidenceFeatures > 0 && (
-                <Alert
-                  type="warning"
-                  showIcon
-                  message={`${summary.lowConfidenceFeatures} feature(s) com baixa confiança — revise.`}
-                />
-              )}
-            </Space>
-          </Card>
-        </Flex>
+        </>
       )}
 
       {scope && (

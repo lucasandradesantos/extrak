@@ -110,6 +110,8 @@ export function AdminPage() {
         platform_multipliers: config.platform_multipliers,
         buffers: config.buffers,
         complexity_ranges: config.complexity_ranges,
+        product_ranges: config.product_ranges,
+        ai_factor: config.ai_factor,
         phases: config.phases.join(", "),
       });
     } catch (err) {
@@ -143,6 +145,8 @@ export function AdminPage() {
     platform_multipliers: ScopeConfig["platform_multipliers"];
     buffers: ScopeConfig["buffers"];
     complexity_ranges: ScopeConfig["complexity_ranges"];
+    product_ranges: ScopeConfig["product_ranges"];
+    ai_factor: number;
     phases: string;
   }) {
     setSavingScopeConfig(true);
@@ -153,6 +157,8 @@ export function AdminPage() {
         platform_multipliers: values.platform_multipliers,
         buffers: values.buffers,
         complexity_ranges: values.complexity_ranges,
+        product_ranges: values.product_ranges,
+        ai_factor: values.ai_factor,
         phases: values.phases
           .split(",")
           .map((p) => p.trim())
@@ -462,26 +468,37 @@ export function AdminPage() {
               >
                 <InputNumber min={0} step={0.1} style={{ width: "100%" }} />
               </Form.Item>
-              <Form.Item label="Buffer QA (fração)" name={["buffers", "qa"]}>
+              <Form.Item label="Buffer QA (fração do Dev)" name={["buffers", "qa"]}>
                 <InputNumber min={0} max={1} step={0.05} style={{ width: "100%" }} />
               </Form.Item>
-              <Form.Item label="Buffer Produto (fração)" name={["buffers", "product"]}>
-                <InputNumber min={0} max={1} step={0.05} style={{ width: "100%" }} />
+              <Form.Item label="Dev — Simples (h)" name={["complexity_ranges", "simples"]}>
+                <InputNumber min={0} step={0.5} style={{ width: "100%" }} />
+              </Form.Item>
+              <Form.Item label="Dev — Média (h)" name={["complexity_ranges", "media"]}>
+                <InputNumber min={0} step={0.5} style={{ width: "100%" }} />
+              </Form.Item>
+              <Form.Item label="Dev — Difícil (h)" name={["complexity_ranges", "dificil"]}>
+                <InputNumber min={0} step={0.5} style={{ width: "100%" }} />
               </Form.Item>
               <Form.Item
-                label="Horas-base — Simples"
-                name={["complexity_ranges", "simples"]}
+                label="Produto — Simples (h)"
+                name={["product_ranges", "simples"]}
+                tooltip="Horas de Produto (discovery + design/protótipo) por feature simples. Disciplina própria, somada por feature."
               >
-                <InputNumber min={1} step={1} style={{ width: "100%" }} />
+                <InputNumber min={0} step={0.5} style={{ width: "100%" }} />
               </Form.Item>
-              <Form.Item label="Horas-base — Média" name={["complexity_ranges", "media"]}>
-                <InputNumber min={1} step={1} style={{ width: "100%" }} />
+              <Form.Item label="Produto — Média (h)" name={["product_ranges", "media"]}>
+                <InputNumber min={0} step={0.5} style={{ width: "100%" }} />
+              </Form.Item>
+              <Form.Item label="Produto — Difícil (h)" name={["product_ranges", "dificil"]}>
+                <InputNumber min={0} step={0.5} style={{ width: "100%" }} />
               </Form.Item>
               <Form.Item
-                label="Horas-base — Difícil"
-                name={["complexity_ranges", "dificil"]}
+                label="Fator de IA (0,05–1)"
+                name="ai_factor"
+                tooltip="Produtividade do time com IA. 1 = ritmo tradicional; 0.4 = ~60% mais rápido. Quanto menor, menos horas de desenvolvimento."
               >
-                <InputNumber min={1} step={1} style={{ width: "100%" }} />
+                <InputNumber min={0.05} max={1} step={0.05} style={{ width: "100%" }} />
               </Form.Item>
             </div>
             <Form.Item

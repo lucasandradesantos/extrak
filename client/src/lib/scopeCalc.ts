@@ -15,6 +15,10 @@ function round1(n: number): number {
   return Math.round(n * 10) / 10;
 }
 
+// Pisos realistas por feature ativa (espelha o servidor).
+const MIN_DEV_HOURS = 2;
+const MIN_QA_HOURS = 1;
+
 export function computeFeatureHours(
   feature: Pick<ScopeFeature, "platforms" | "complexity" | "lowcode_factor" | "is_active">,
   config: ScopeConfig,
@@ -25,28 +29,20 @@ export function computeFeatureHours(
 
   const base =
     config.complexity_ranges[feature.complexity] ?? config.complexity_ranges.media;
-  const lowcode = feature.lowcode_factor || 1;
   const platforms: ScopePlatform[] =
     feature.platforms.length > 0 ? feature.platforms : ["web"];
+  const platformMult = Math.max(
+    ...platforms.map((p) => config.platform_multipliers[p] ?? 1)
+  );
   const margin = 1 + Math.min(1, Math.max(0, riskMargin || 0));
+  const aiFactor = Math.min(1, Math.max(0.05, config.ai_factor || 1));
 
-  let development = 0;
-  for (const platform of platforms) {
-    const multiplier = config.platform_multipliers[platform] ?? 1;
-    development += base * lowcode * multiplier;
-  }
-  development *= margin;
+  let development = base * platformMult * aiFactor * margin;
+  development = Math.max(development, MIN_DEV_HOURS);
 
-  let qa = development * config.buffers.qa;
-  let product = development * config.buffers.product;
-  let total = development + qa + product;
-
-  if (total < 1) {
-    development = 1;
-    qa = 0;
-    product = 0;
-    total = 1;
-  }
+  const qa = Math.max(development * config.buffers.qa, MIN_QA_HOURS);
+  const product = config.product_ranges?.[feature.complexity] ?? 0;
+  const total = development + qa + product;
 
   return {
     product: round1(product),
@@ -146,8 +142,8 @@ export function scopeToMarkdown(
     `# Escopo — ${projectName}`,
     "",
     `**Modelo de venda:** ${modelLabel} · **Margem de risco:** ${marginPct}%`,
-    `**Total:** ${summary.totalHours}h · **Valor estimado:** R$ ${summary.estimatedValue.toLocaleString("pt-BR")} (R$ ${config.hourly_rate}/h)`,
-    `**Produto:** ${summary.byDiscipline.product}h · **Dev:** ${summary.byDiscipline.development}h · **QA:** ${summary.byDiscipline.qa}h`,
+    `**Total:** ${formatHm(summary.totalHours)} (h:mm)`,
+    `**Produto:** ${formatHm(summary.byDiscipline.product)} · **Dev:** ${formatHm(summary.byDiscipline.development)} · **QA:** ${formatHm(summary.byDiscipline.qa)}`,
     "",
   ];
 
@@ -155,12 +151,12 @@ export function scopeToMarkdown(
     lines.push(`## ${mod.name}${mod.is_mandatory ? " (obrigatório)" : ""}`);
     if (mod.description_client) lines.push(`_${mod.description_client}_`);
     lines.push("");
-    lines.push("| Feature | Plataformas | Fase | Complexidade | Low-code | Horas (P/D/QA) | Total |");
-    lines.push("|---|---|---|---|---|---|---|");
+    lines.push("| Funcionalidade | Fase | Produto | Dev | QA | Total |");
+    lines.push("|---|---|---|---|---|---|");
     for (const f of mod.features) {
       const active = f.is_active ? "" : " _(inativa)_";
       lines.push(
-        `| ${f.title}${active} | ${f.platforms.join(", ")} | ${f.phase} | ${PT_COMPLEXITY[f.complexity]} | ${f.lowcode_factor} | ${f.hours.product}/${f.hours.development}/${f.hours.qa} | ${f.hours.total}h |`
+        `| ${f.title}${active} | ${f.phase} | ${formatHm(f.hours.product)} | ${formatHm(f.hours.development)} | ${formatHm(f.hours.qa)} | ${formatHm(f.hours.total)} |`
       );
     }
     lines.push("");
@@ -196,3 +192,22 @@ export const PT_SALES_MODEL: Record<NonNullable<ScopeData["sales_model"]>, strin
   fechado: "Escopo fechado",
   banco_horas: "Banco de horas",
 };
+
+/** Formata horas decimais como h:mm (ex.: 1.6 → "1:36", 0.1 → "0:06"). */
+export function formatHm(hours: number): string {
+  const totalMin = Math.round((Number.isFinite(hours) ? hours : 0) * 60);
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  return `${h}:${String(m).padStart(2, "0")}`;
+}
+
+/** Converte "h:mm" (ou número) de volta para horas decimais. */
+export function parseHm(value: string): number {
+  if (!value) return 0;
+  const cleaned = String(value).replace(/[^\d:]/g, "");
+  if (cleaned.includes(":")) {
+    const [hh, mm = "0"] = cleaned.split(":");
+    return (parseInt(hh, 10) || 0) + (parseInt(mm, 10) || 0) / 60;
+  }
+  return parseInt(cleaned, 10) || 0;
+}

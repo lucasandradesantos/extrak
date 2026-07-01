@@ -35,8 +35,18 @@ export interface ScopeConfig {
   hourly_rate: number;
   platform_multipliers: Record<ScopePlatform, number>;
   buffers: { qa: number; product: number };
-  /** Horas-base por nível de complexidade (faixas do PRD §4.3). */
+  /** Horas-base de DESENVOLVIMENTO por nível de complexidade. */
   complexity_ranges: Record<ScopeComplexity, number>;
+  /**
+   * Horas-base de PRODUTO (discovery + design/protótipo) por complexidade.
+   * Disciplina própria, independente do Dev (não é buffer).
+   */
+  product_ranges: Record<ScopeComplexity, number>;
+  /**
+   * Fator de produtividade com IA aplicado às horas de desenvolvimento.
+   * 1 = ritmo tradicional; 0.4 = ~60% mais rápido com o time usando IA.
+   */
+  ai_factor: number;
   phases: string[];
 }
 
@@ -83,10 +93,22 @@ export function clampRiskMargin(value: unknown): number {
 export const DEFAULT_SCOPE_CONFIG: ScopeConfig = {
   hourly_rate: 150,
   platform_multipliers: { web: 1.0, mobile_native: 1.4, mobile_responsive: 1.1 },
-  buffers: { qa: 0.15, product: 0.1 },
-  complexity_ranges: { simples: 4, media: 10, dificil: 26 },
+  buffers: { qa: 0.2, product: 0.1 },
+  // Horas-base REALISTAS de Dev por feature (time com IA já embutido).
+  complexity_ranges: { simples: 2, media: 3, dificil: 6 },
+  // Produto (discovery + design/protótipo): disciplina própria por feature.
+  product_ranges: { simples: 0.5, media: 1, dificil: 1.5 },
+  // Multiplicador global opcional (1 = sem ajuste; bases já são realistas).
+  ai_factor: 1,
   phases: ["MVP", "V2", "V3"],
 };
+
+/** Fator de IA num intervalo seguro (0.05–1). */
+export function clampAiFactor(value: unknown): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return DEFAULT_SCOPE_CONFIG.ai_factor;
+  return Math.min(1, Math.max(0.05, n));
+}
 
 // --- Configuração global -----------------------------------------------------
 
@@ -103,6 +125,11 @@ function mergeConfig(partial: Partial<ScopeConfig> | null): ScopeConfig {
       ...DEFAULT_SCOPE_CONFIG.complexity_ranges,
       ...(partial.complexity_ranges ?? {}),
     },
+    product_ranges: {
+      ...DEFAULT_SCOPE_CONFIG.product_ranges,
+      ...(partial.product_ranges ?? {}),
+    },
+    ai_factor: clampAiFactor(partial.ai_factor ?? DEFAULT_SCOPE_CONFIG.ai_factor),
     phases:
       Array.isArray(partial.phases) && partial.phases.length > 0
         ? partial.phases
@@ -141,11 +168,17 @@ function round1(n: number): number {
   return Math.round(n * 10) / 10;
 }
 
+// Pisos realistas por feature ativa (uma feature não custa menos que isso).
+const MIN_DEV_HOURS = 2;
+const MIN_QA_HOURS = 1;
+
 /**
- * Calcula as horas de UMA feature (Produto/Dev/QA) a partir da complexidade,
- * do fator low-code e dos multiplicadores de plataforma. Fórmula do PRD §4.3.
- * A margem de risco (escopo fechado/banco de horas) infla P/D/QA por (1+margem).
- * Piso de 1h para features ativas; features inativas zeram.
+ * Calcula as horas de UMA feature (Produto/Dev/QA).
+ * - Dev = horas-base por complexidade (já realistas, time com IA) × maior
+ *   multiplicador de plataforma × (1 + margem), com piso de 2h.
+ * - QA = % do Dev (buffer), com piso de 1h.
+ * - Produto = disciplina própria (discovery + design) por complexidade.
+ * O fator de IA (ai_factor) é um multiplicador global opcional (default 1).
  */
 export function computeFeatureHours(
   feature: Pick<ScopeFeature, "platforms" | "complexity" | "lowcode_factor" | "is_active">,
@@ -156,28 +189,20 @@ export function computeFeatureHours(
   if (!feature.is_active) return zero;
 
   const base = config.complexity_ranges[feature.complexity] ?? config.complexity_ranges.media;
-  const lowcode = feature.lowcode_factor || 1;
   const platforms = feature.platforms.length > 0 ? feature.platforms : ["web" as const];
+  // Maior multiplicador entre as plataformas (não soma — evita inflar multi-plataforma).
+  const platformMult = Math.max(
+    ...platforms.map((p) => config.platform_multipliers[p] ?? 1)
+  );
   const margin = 1 + clampRiskMargin(riskMargin);
 
-  let development = 0;
-  for (const platform of platforms) {
-    const multiplier = config.platform_multipliers[platform] ?? 1;
-    development += base * lowcode * multiplier;
-  }
-  development *= margin;
+  let development = base * platformMult * clampAiFactor(config.ai_factor) * margin;
+  development = Math.max(development, MIN_DEV_HOURS);
 
-  let qa = development * config.buffers.qa;
-  let product = development * config.buffers.product;
-  let total = development + qa + product;
-
-  // Piso de 1h numa feature ativa.
-  if (total < 1) {
-    development = 1;
-    qa = 0;
-    product = 0;
-    total = 1;
-  }
+  const qa = Math.max(development * config.buffers.qa, MIN_QA_HOURS);
+  // Produto é disciplina própria (discovery + design), independente do Dev.
+  const product = config.product_ranges?.[feature.complexity] ?? 0;
+  const total = development + qa + product;
 
   return {
     product: round1(product),
